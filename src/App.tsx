@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+
 
 /* =========================================================
    Supabase Config
@@ -7,15 +8,15 @@ import { createClient } from "@supabase/supabase-js";
      VITE_SUPABASE_URL=...
      VITE_SUPABASE_ANON_KEY=...
 ========================================================= */
-const SUPABASE_URL =
-  import.meta.env.VITE_SUPABASE_URL ??
-  "https://hwjxojkkmvqpwsuxbjlw.supabase.co";
 
-const SUPABASE_ANON_KEY =
-  import.meta.env.VITE_SUPABASE_ANON_KEY ??
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh3anhvamtrbXZxcHdzdXhiamx3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU2MDgzMTgsImV4cCI6MjA4MTE4NDMxOH0.00_yWsIDZdbdlSMlT5sxubiaEsw6FHXxxzcyt7fW2FI";
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? "";
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY ?? "";
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// Create client lazily (avoids accidental creation with empty env)
+function getSupabase(): SupabaseClient | null {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return null;
+  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+}
 
 /* =========================================================
    Types
@@ -217,7 +218,6 @@ function wxIcon(code?: number | null): string {
 }
 
 function todayISO(): string {
-  // local date (device timezone)
   const d = new Date();
   const yyyy = d.getFullYear();
   const mm = String(d.getMonth() + 1).padStart(2, "0");
@@ -227,9 +227,10 @@ function todayISO(): string {
 
 function nowHHMM(): string {
   const d = new Date();
-  return `${String(d.getHours()).padStart(2, "0")}:${String(
-    d.getMinutes()
-  ).padStart(2, "0")}`;
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(
+    2,
+    "0"
+  )}`;
 }
 
 function prettyDate(iso: string): string {
@@ -269,16 +270,36 @@ function safeParseJSON(text: string): unknown {
   }
 }
 
+function defaultState(): AppState {
+  return {
+    vessel: {},
+    watchkeeper: "",
+    notes: [],
+    log: [],
+    history: [],
+    pos: {
+      latDeg: "",
+      latMin: "",
+      latHem: "S",
+      lonDeg: "",
+      lonMin: "",
+      lonHem: "E",
+    },
+    daily: { date: todayISO(), location: "", mode: "Along" },
+    coords: { lat: null, lon: null },
+    locLabel: "Cairns, QLD",
+    lastWeather: {},
+    updatedAtISO: new Date().toISOString(),
+  };
+}
+
 function normalizeBackupToState(obj: unknown): AppState | null {
   const fallback: AppState = defaultState();
-
   if (!obj || typeof obj !== "object") return null;
 
-  // Support either {kind:'BridgeLogProBackup', state:{...}} or raw state
   const asAny = obj as Record<string, unknown>;
-  const src = (asAny.kind === "BridgeLogProBackup" && asAny.state
-    ? asAny.state
-    : obj) as unknown;
+  const src =
+    asAny.kind === "BridgeLogProBackup" && asAny.state ? asAny.state : obj;
 
   if (!src || typeof src !== "object") return null;
   const s = src as Record<string, unknown>;
@@ -292,9 +313,7 @@ function normalizeBackupToState(obj: unknown): AppState | null {
   const history = Array.isArray(s.history) ? (s.history as HistoryDay[]) : [];
 
   const pos =
-    s.pos && typeof s.pos === "object"
-      ? (s.pos as PosState)
-      : fallback.pos;
+    s.pos && typeof s.pos === "object" ? (s.pos as PosState) : fallback.pos;
 
   const daily =
     s.daily && typeof s.daily === "object"
@@ -307,8 +326,8 @@ function normalizeBackupToState(obj: unknown): AppState | null {
       : fallback.coords;
 
   const watchkeeper = typeof s.watchkeeper === "string" ? s.watchkeeper : "";
-
-  const locLabel = typeof s.locLabel === "string" ? s.locLabel : fallback.locLabel;
+  const locLabel =
+    typeof s.locLabel === "string" ? s.locLabel : fallback.locLabel;
 
   const lastWeather =
     s.lastWeather && typeof s.lastWeather === "object"
@@ -319,14 +338,24 @@ function normalizeBackupToState(obj: unknown): AppState | null {
     vessel: vessel ?? {},
     watchkeeper,
     notes: notes
-      .filter((n) => n && typeof n === "object" && typeof (n as Note).text === "string")
+      .filter(
+        (n) =>
+          n &&
+          typeof n === "object" &&
+          typeof (n as Note).text === "string"
+      )
       .map((n) => ({
         date: String((n as Note).date ?? daily.date ?? todayISO()),
         time: String((n as Note).time ?? ""),
         text: String((n as Note).text ?? ""),
       })),
     log: log
-      .filter((r) => r && typeof r === "object" && typeof (r as RunningEntry).time === "string")
+      .filter(
+        (r) =>
+          r &&
+          typeof r === "object" &&
+          typeof (r as RunningEntry).time === "string"
+      )
       .map((r) => ({
         date: String((r as RunningEntry).date ?? daily.date ?? todayISO()),
         time: String((r as RunningEntry).time ?? ""),
@@ -344,25 +373,38 @@ function normalizeBackupToState(obj: unknown): AppState | null {
         airTemp: String((r as RunningEntry).airTemp ?? ""),
         seaTemp: String((r as RunningEntry).seaTemp ?? ""),
         engines: String((r as RunningEntry).engines ?? ""),
-        watchkeeper: String((r as RunningEntry).watchkeeper ?? watchkeeper ?? ""),
+        watchkeeper: String(
+          (r as RunningEntry).watchkeeper ?? watchkeeper ?? ""
+        ),
         remarks: String((r as RunningEntry).remarks ?? ""),
       })),
     history: history
-      .filter((h) => h && typeof h === "object" && typeof (h as HistoryDay).date === "string")
+      .filter(
+        (h) =>
+          h &&
+          typeof h === "object" &&
+          typeof (h as HistoryDay).date === "string"
+      )
       .map((h) => ({
         date: String((h as HistoryDay).date ?? ""),
         location: String((h as HistoryDay).location ?? ""),
-        vesselMode: (String((h as HistoryDay).vesselMode ?? "Along") as DailyState["mode"]) ?? "Along",
+        vesselMode:
+          (String((h as HistoryDay).vesselMode ?? "Along") as DailyState["mode"]) ??
+          "Along",
         vessel:
           (h as HistoryDay).vessel && typeof (h as HistoryDay).vessel === "object"
             ? (h as HistoryDay).vessel
             : vessel,
-        notes: Array.isArray((h as HistoryDay).notes) ? (h as HistoryDay).notes : [],
+        notes: Array.isArray((h as HistoryDay).notes)
+          ? (h as HistoryDay).notes
+          : [],
         weather:
           (h as HistoryDay).weather && typeof (h as HistoryDay).weather === "object"
             ? (h as HistoryDay).weather
             : {},
-        runningLog: Array.isArray((h as HistoryDay).runningLog) ? (h as HistoryDay).runningLog : [],
+        runningLog: Array.isArray((h as HistoryDay).runningLog)
+          ? (h as HistoryDay).runningLog
+          : [],
       })),
     pos: {
       latDeg: String((pos as PosState).latDeg ?? ""),
@@ -389,41 +431,13 @@ function normalizeBackupToState(obj: unknown): AppState | null {
   return normalized;
 }
 
-function defaultState(): AppState {
-  return {
-    vessel: {},
-    watchkeeper: "",
-    notes: [],
-    log: [],
-    history: [],
-    pos: {
-      latDeg: "",
-      latMin: "",
-      latHem: "S",
-      lonDeg: "",
-      lonMin: "",
-      lonHem: "E",
-    },
-    daily: { date: todayISO(), location: "", mode: "Along" },
-    coords: { lat: null, lon: null },
-    locLabel: "Cairns, QLD",
-    lastWeather: {},
-    updatedAtISO: new Date().toISOString(),
-  };
-}
-
 /* =========================================================
    Supabase Storage (per vessel login)
-   Table expected: blp_state
-   Columns:
-     user_id uuid primary key references auth.users(id)
-     state jsonb not null
-     updated_at timestamptz default now()
-
-   RLS policies:
-     SELECT/INSERT/UPDATE where auth.uid() = user_id
 ========================================================= */
-async function loadStateFromSupabase(userId: string): Promise<AppState | null> {
+async function loadStateFromSupabase(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<AppState | null> {
   const { data, error } = await supabase
     .from("blp_state")
     .select("state")
@@ -437,15 +451,23 @@ async function loadStateFromSupabase(userId: string): Promise<AppState | null> {
   return norm ?? null;
 }
 
-async function upsertStateToSupabase(userId: string, state: AppState): Promise<void> {
-  // keep it lean
+async function upsertStateToSupabase(
+  supabase: SupabaseClient,
+  userId: string,
+  state: AppState
+): Promise<{ ok: boolean; error?: string }> {
   const payload = {
     user_id: userId,
     state,
     updated_at: new Date().toISOString(),
   };
 
-  await supabase.from("blp_state").upsert(payload, { onConflict: "user_id" });
+  const { error } = await supabase
+    .from("blp_state")
+    .upsert(payload, { onConflict: "user_id" });
+
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
 }
 
 /* =========================================================
@@ -454,8 +476,8 @@ async function upsertStateToSupabase(userId: string, state: AppState): Promise<v
 function GlobalStyles() {
   return (
     <style>{`
-      :root { --bg:#f6f7fb; --fg:#0a0a0a; --muted:#60646c; --card:#fff; --card-border:#e7e8ec; --input-bg:#fff; --input-border:#d7d9df; --badge-bg:#f1f3f7; --btn-bg:#111827; --btn-border:#0b1220; --btn-hover:#0d1526; --table-head:#f1f3f7; }
-      html[data-theme="dark"] { --bg:#0b0b0b; --fg:#fff; --muted:#bbb; --card:#111; --card-border:#2a2a2a; --input-bg:#0b0b0b; --input-border:#2a2a2a; --badge-bg:#1a1a1a; --btn-bg:#222; --btn-border:#3a3a3a; --btn-hover:#2a2a2a; --table-head:#0f0f0f; }
+      :root { --bg:#f6f7fb; --fg:#0a0a0a; --muted:#60646c; --card:#fff; --card-border:#e7e8ec; --input-bg:#fff; --input-border:#d7d9df; --badge-bg:#f1f3f7; --btn-bg:#111827; --btn-border:#0b1220; --btn-hover:#0d1526; --table-head:#f1f3f7; --warn:#7c2d12; --ok:#14532d; }
+      html[data-theme="dark"] { --bg:#0b0b0b; --fg:#fff; --muted:#bbb; --card:#111; --card-border:#2a2a2a; --input-bg:#0b0b0b; --input-border:#2a2a2a; --badge-bg:#1a1a1a; --btn-bg:#222; --btn-border:#3a3a3a; --btn-hover:#2a2a2a; --table-head:#0f0f0f; --warn:#fb923c; --ok:#4ade80; }
       html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,Noto Sans; height:auto; min-height:100%;}
       body{overflow:auto;}
       .container{max-width:1120px;margin:0 auto;padding:16px}
@@ -488,6 +510,10 @@ function GlobalStyles() {
       #toast{position:fixed;left:12px;right:12px;bottom:12px;background:#7f1d1d;color:#fff;padding:10px;font-family:ui-monospace,monospace;display:none;z-index:999999;border-radius:10px}
       details{border:1px solid var(--card-border);border-radius:10px;margin:8px 0;padding:6px;background:transparent}
       summary{cursor:pointer}
+      .banner{border:1px solid var(--card-border);border-radius:12px;padding:10px 12px;background:var(--badge-bg);margin-bottom:12px}
+      .dot{width:8px;height:8px;border-radius:999px;background:var(--muted);display:inline-block}
+      .dot.ok{background:var(--ok)}
+      .dot.warn{background:var(--warn)}
     `}</style>
   );
 }
@@ -496,6 +522,10 @@ function GlobalStyles() {
    App
 ========================================================= */
 export default function App() {
+  const supabaseRef = useRef<SupabaseClient | null>(null);
+  if (!supabaseRef.current) supabaseRef.current = getSupabase();
+  const supabase = supabaseRef.current;
+
   const [theme, setTheme] = useState<Theme>(() => {
     const t = localStorage.getItem("blp-theme");
     return t === "light" ? "light" : "dark";
@@ -506,6 +536,10 @@ export default function App() {
 
   const [sessionReady, setSessionReady] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
+
+  // Saving status
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // login form
   const [loginEmail, setLoginEmail] = useState("");
@@ -538,13 +572,25 @@ export default function App() {
   // session init
   useEffect(() => {
     let mounted = true;
+
     (async () => {
+      if (!supabase) {
+        setUserId(null);
+        setSessionReady(true);
+        return;
+      }
       const { data } = await supabase.auth.getSession();
       if (!mounted) return;
       const uid = data.session?.user?.id ?? null;
       setUserId(uid);
       setSessionReady(true);
     })();
+
+    if (!supabase) {
+      return () => {
+        mounted = false;
+      };
+    }
 
     const { data: sub } = supabase.auth.onAuthStateChange((_event, sess) => {
       setUserId(sess?.user?.id ?? null);
@@ -554,15 +600,17 @@ export default function App() {
       mounted = false;
       sub.subscription.unsubscribe();
     };
-  }, []);
+  }, [supabase]);
 
-  // Load per-user state from Supabase when logged in
+  // Load per-user state when logged in
   useEffect(() => {
-    if (!userId) return;
+    if (!supabase || !userId) return;
+
     let cancelled = false;
 
     (async () => {
-      // also try local cache fallback
+      setSaveError(null);
+
       const cacheKey = `blp-cache-${userId}`;
       const cached = localStorage.getItem(cacheKey);
       if (cached) {
@@ -571,7 +619,7 @@ export default function App() {
         if (norm && !cancelled) setState(norm);
       }
 
-      const remote = await loadStateFromSupabase(userId);
+      const remote = await loadStateFromSupabase(supabase, userId);
       if (remote && !cancelled) {
         setState(remote);
         localStorage.setItem(cacheKey, JSON.stringify(remote));
@@ -581,22 +629,39 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [userId]);
+  }, [supabase, userId]);
 
   // Save to Supabase (debounced)
   const saveTimer = useRef<number | null>(null);
   useEffect(() => {
-    if (!userId) return;
+    if (!supabase || !userId) return;
+
     const cacheKey = `blp-cache-${userId}`;
     localStorage.setItem(cacheKey, JSON.stringify(state));
 
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => {
-      void upsertStateToSupabase(userId, { ...state, updatedAtISO: new Date().toISOString() });
-    }, 700);
-  }, [state, userId]);
 
-  // midnight rollover: save the day and roll to new local date
+    setIsSaving(true);
+    setSaveError(null);
+
+    // Important: do NOT keep mutating state in the save path
+    const toSave: AppState = { ...state, updatedAtISO: new Date().toISOString() };
+
+    saveTimer.current = window.setTimeout(async () => {
+      const res = await upsertStateToSupabase(supabase, userId, toSave);
+      if (!res.ok) {
+        setSaveError(res.error ?? "Save failed");
+        showToast(res.error ?? "Save failed");
+      }
+      setIsSaving(false);
+    }, 650);
+
+    return () => {
+      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    };
+  }, [supabase, state, userId]);
+
+  // midnight rollover: save snapshot of previous day and roll date
   useEffect(() => {
     if (!userId) return;
 
@@ -604,7 +669,6 @@ export default function App() {
       const d = todayISO();
       if (d !== state.daily.date) {
         setState((prev) => {
-          // auto-save snapshot for the previous day
           const snap: HistoryDay = {
             date: prev.daily.date,
             location: prev.daily.location,
@@ -614,15 +678,11 @@ export default function App() {
             weather: prev.lastWeather ?? {},
             runningLog: prev.log.filter((e) => e.date === prev.daily.date),
           };
-          const nextHistory = [snap, ...prev.history];
-
-          // clear that day’s notes (match your HTML logic)
-          const nextNotes = prev.notes.filter((n) => n.date !== prev.daily.date);
 
           return {
             ...prev,
-            history: nextHistory,
-            notes: nextNotes,
+            history: [snap, ...prev.history],
+            notes: prev.notes.filter((n) => n.date !== prev.daily.date),
             daily: { ...prev.daily, date: d },
           };
         });
@@ -642,14 +702,22 @@ export default function App() {
     [state.notes, state.daily.date]
   );
 
-  const todaysLog = useMemo(() => {
-    return state.log.filter((e) => e.date === state.daily.date);
-  }, [state.log, state.daily.date]);
+  const todaysLog = useMemo(
+    () => state.log.filter((e) => e.date === state.daily.date),
+    [state.log, state.daily.date]
+  );
 
   /* -------------------------
      Weather + Marine
   -------------------------- */
+  const lastWxFetchRef = useRef<number>(0);
+
   async function fetchWeather(lat: number, lon: number) {
+    // throttle: max once per 10 seconds
+    const now = Date.now();
+    if (now - lastWxFetchRef.current < 10_000) return;
+    lastWxFetchRef.current = now;
+
     try {
       const u = new URL("https://api.open-meteo.com/v1/forecast");
       u.searchParams.set("latitude", String(lat));
@@ -685,20 +753,16 @@ export default function App() {
         pressure: typeof c.pressure_msl === "number" ? c.pressure_msl : null,
         visibilityKm:
           typeof c.visibility === "number" ? c.visibility / 1000 : null,
-        weatherCode:
-          typeof c.weather_code === "number" ? c.weather_code : null,
-        condition:
-          typeof c.weather_code === "number" ? WMO[c.weather_code] : null,
+        weatherCode: typeof c.weather_code === "number" ? c.weather_code : null,
+        condition: typeof c.weather_code === "number" ? WMO[c.weather_code] : null,
         precipMmHr:
           typeof c.precipitation === "number" ? c.precipitation : null,
         humidityPct:
           typeof c.relative_humidity_2m === "number"
             ? c.relative_humidity_2m
             : null,
-        cloudPct:
-          typeof c.cloud_cover === "number" ? c.cloud_cover : null,
-        dewPointC:
-          typeof c.dew_point_2m === "number" ? c.dew_point_2m : null,
+        cloudPct: typeof c.cloud_cover === "number" ? c.cloud_cover : null,
+        dewPointC: typeof c.dew_point_2m === "number" ? c.dew_point_2m : null,
       };
 
       // marine
@@ -712,10 +776,8 @@ export default function App() {
         if (mr.ok) {
           const md = (await mr.json()) as { current?: Record<string, unknown> };
           const mc = md.current ?? {};
-          wx.waveHeightM =
-            typeof mc.wave_height === "number" ? mc.wave_height : null;
-          wx.wavePeriodS =
-            typeof mc.wave_period === "number" ? mc.wave_period : null;
+          wx.waveHeightM = typeof mc.wave_height === "number" ? mc.wave_height : null;
+          wx.wavePeriodS = typeof mc.wave_period === "number" ? mc.wave_period : null;
           wx.waveDirDeg =
             typeof mc.wave_direction === "number" ? mc.wave_direction : null;
         }
@@ -777,12 +839,11 @@ export default function App() {
     void fetchWeather(lat, lon);
   }
 
-  // if stored coords exist, load weather once
+  // If stored coords exist, load weather once on login
   useEffect(() => {
+    if (!userId) return;
     const { lat, lon } = state.coords;
-    if (lat != null && lon != null) {
-      void fetchWeather(lat, lon);
-    }
+    if (lat != null && lon != null) void fetchWeather(lat, lon);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
@@ -808,10 +869,7 @@ export default function App() {
     if (!v) return;
     setState((prev) => ({
       ...prev,
-      notes: [
-        { date: prev.daily.date, time: nowHHMM(), text: v },
-        ...prev.notes,
-      ],
+      notes: [{ date: prev.daily.date, time: nowHHMM(), text: v }, ...prev.notes],
     }));
     setNoteDraft("");
   }
@@ -882,15 +940,10 @@ export default function App() {
 
   function addMovement(kind: "Along" | "Cast Off" | "Anchor Down" | "Anchor Up") {
     const p = composedPos() || (todaysLog[0]?.position ?? "(pos TBD)");
-    const depth = ""; // you can add an input if you want this exactly like HTML
-    const extra = kind === "Anchor Down" && depth ? `; depth ${depth} m` : "";
-    const text = `${kind} at ${p}${extra}`;
+    const text = `${kind} at ${p}`;
 
     setState((prev) => {
-      const nextNotes = [
-        { date: prev.daily.date, time: nowHHMM(), text },
-        ...prev.notes,
-      ];
+      const nextNotes = [{ date: prev.daily.date, time: nowHHMM(), text }, ...prev.notes];
       const nextLog = [
         {
           date: prev.daily.date,
@@ -966,11 +1019,13 @@ export default function App() {
       state,
     };
     const ts = new Date();
-    const name = `bridge-log-backup-${ts.getFullYear()}${String(ts.getMonth() + 1).padStart(2, "0")}${String(
-      ts.getDate()
-    ).padStart(2, "0")}-${String(ts.getHours()).padStart(2, "0")}${String(
-      ts.getMinutes()
-    ).padStart(2, "0")}.json`;
+    const name = `bridge-log-backup-${ts.getFullYear()}${String(ts.getMonth() + 1).padStart(
+      2,
+      "0"
+    )}${String(ts.getDate()).padStart(2, "0")}-${String(ts.getHours()).padStart(
+      2,
+      "0"
+    )}${String(ts.getMinutes()).padStart(2, "0")}.json`;
 
     downloadJSON(name, payload);
   }
@@ -991,6 +1046,10 @@ export default function App() {
      Auth
   -------------------------- */
   async function doLogin() {
+    if (!supabase) {
+      setLoginStatus("Missing Supabase env vars (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY)");
+      return;
+    }
     if (!loginEmail.trim()) {
       setLoginStatus("Enter email");
       return;
@@ -1016,13 +1075,14 @@ export default function App() {
   }
 
   async function doLogout() {
+    if (!supabase) return;
     await supabase.auth.signOut();
     setLoginStatus("Not logged in");
     showToast("Logged out", true);
   }
 
   /* =========================================================
-     Render: Login gate
+     Render: Session loading
 ========================================================= */
   if (!sessionReady) {
     return (
@@ -1040,6 +1100,9 @@ export default function App() {
     );
   }
 
+  /* =========================================================
+     Render: Login gate
+========================================================= */
   if (!userId) {
     return (
       <>
@@ -1047,6 +1110,20 @@ export default function App() {
         <div id="toast">{toast}</div>
 
         <div className="container">
+          {!supabase ? (
+            <div className="banner">
+              <div className="row">
+                <span className="dot warn" />
+                <b>Supabase not configured</b>
+              </div>
+              <div className="muted" style={{ marginTop: 6 }}>
+                Add <span className="mono">VITE_SUPABASE_URL</span> and{" "}
+                <span className="mono">VITE_SUPABASE_ANON_KEY</span> to your{" "}
+                <span className="mono">.env</span> (then restart Vite).
+              </div>
+            </div>
+          ) : null}
+
           <header className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
             <div className="row">
               <div className="pill">BridgeLog Pro</div>
@@ -1110,6 +1187,13 @@ export default function App() {
             <div className="badge mono" title="Location label">
               {state.locLabel}
             </div>
+
+            <div className="badge">
+              <span className={`dot ${saveError ? "warn" : isSaving ? "" : "ok"}`} />
+              <span className="mono">
+                {saveError ? "Save error" : isSaving ? "Saving…" : "Saved"}
+              </span>
+            </div>
           </div>
 
           <div className="row">
@@ -1145,8 +1229,21 @@ export default function App() {
           </div>
         </header>
 
+        {saveError ? (
+          <div className="banner">
+            <div className="row">
+              <span className="dot warn" />
+              <b>Cloud save failed</b>
+            </div>
+            <div className="muted" style={{ marginTop: 6 }}>
+              {saveError} — your local cache is still updating. Check RLS policy on{" "}
+              <span className="mono">blp_state</span>.
+            </div>
+          </div>
+        ) : null}
+
         <div className="grid grid-2">
-          {/* Left column stack */}
+          {/* Left column */}
           <div className="stack">
             <div className="col">
               <div className="section">
@@ -1261,17 +1358,44 @@ export default function App() {
                 </div>
 
                 <div className="row" style={{ marginTop: 6 }}>
-                  <div className="badge">Temp <span className="right">{wx.tempC != null ? `${wx.tempC}°C` : "—°C"}</span></div>
-                  <div className="badge">Wind <span className="right">{wx.windKts != null ? `${wx.windKts} kt` : "— kt"} / {wx.windDir != null ? `${wx.windDir}°` : "—°"}</span></div>
-                  <div className="badge">Pressure <span className="right">{wx.pressure != null ? `${wx.pressure} hPa` : "— hPa"}</span></div>
-                  <div className="badge">Vis <span className="right">{wx.visibilityKm != null ? `${wx.visibilityKm.toFixed(1)} km` : "— km"}</span></div>
+                  <div className="badge">
+                    Temp <span className="right">{wx.tempC != null ? `${wx.tempC}°C` : "—°C"}</span>
+                  </div>
+                  <div className="badge">
+                    Wind{" "}
+                    <span className="right">
+                      {wx.windKts != null ? `${wx.windKts} kt` : "— kt"} /{" "}
+                      {wx.windDir != null ? `${wx.windDir}°` : "—°"}
+                    </span>
+                  </div>
+                  <div className="badge">
+                    Pressure{" "}
+                    <span className="right">{wx.pressure != null ? `${wx.pressure} hPa` : "— hPa"}</span>
+                  </div>
+                  <div className="badge">
+                    Vis{" "}
+                    <span className="right">
+                      {wx.visibilityKm != null ? `${wx.visibilityKm.toFixed(1)} km` : "— km"}
+                    </span>
+                  </div>
                 </div>
 
                 <div className="row" style={{ marginTop: 6 }}>
-                  <div className="badge">Humidity <span className="right">{wx.humidityPct != null ? `${wx.humidityPct}%` : "—%"}</span></div>
-                  <div className="badge">Cloud <span className="right">{wx.cloudPct != null ? `${wx.cloudPct}%` : "—%"}</span></div>
-                  <div className="badge">Precip <span className="right">{wx.precipMmHr != null ? `${wx.precipMmHr} mm/h` : "— mm/h"}</span></div>
-                  <div className="badge">Dew Pt <span className="right">{wx.dewPointC != null ? `${wx.dewPointC}°C` : "—°C"}</span></div>
+                  <div className="badge">
+                    Humidity{" "}
+                    <span className="right">{wx.humidityPct != null ? `${wx.humidityPct}%` : "—%"}</span>
+                  </div>
+                  <div className="badge">
+                    Cloud <span className="right">{wx.cloudPct != null ? `${wx.cloudPct}%` : "—%"}</span>
+                  </div>
+                  <div className="badge">
+                    Precip{" "}
+                    <span className="right">{wx.precipMmHr != null ? `${wx.precipMmHr} mm/h` : "— mm/h"}</span>
+                  </div>
+                  <div className="badge">
+                    Dew Pt{" "}
+                    <span className="right">{wx.dewPointC != null ? `${wx.dewPointC}°C` : "—°C"}</span>
+                  </div>
                 </div>
 
                 <div className="row" style={{ marginTop: 6 }}>
@@ -1319,7 +1443,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Right column stack */}
+          {/* Right column */}
           <div className="stack">
             <div className="col">
               <div className="section">
@@ -1340,17 +1464,26 @@ export default function App() {
                       className="mono"
                       placeholder="Lat°"
                       value={state.pos.latDeg}
-                      onChange={(e) => setState((p) => ({ ...p, pos: { ...p.pos, latDeg: e.target.value } }))}
+                      onChange={(e) =>
+                        setState((p) => ({ ...p, pos: { ...p.pos, latDeg: e.target.value } }))
+                      }
                     />
                     <input
                       className="mono"
                       placeholder="Lat'"
                       value={state.pos.latMin}
-                      onChange={(e) => setState((p) => ({ ...p, pos: { ...p.pos, latMin: e.target.value } }))}
+                      onChange={(e) =>
+                        setState((p) => ({ ...p, pos: { ...p.pos, latMin: e.target.value } }))
+                      }
                     />
                     <select
                       value={state.pos.latHem}
-                      onChange={(e) => setState((p) => ({ ...p, pos: { ...p.pos, latHem: e.target.value as "N" | "S" } }))}
+                      onChange={(e) =>
+                        setState((p) => ({
+                          ...p,
+                          pos: { ...p.pos, latHem: e.target.value as "N" | "S" },
+                        }))
+                      }
                     >
                       <option value="N">N</option>
                       <option value="S">S</option>
@@ -1362,17 +1495,26 @@ export default function App() {
                       className="mono"
                       placeholder="Lon°"
                       value={state.pos.lonDeg}
-                      onChange={(e) => setState((p) => ({ ...p, pos: { ...p.pos, lonDeg: e.target.value } }))}
+                      onChange={(e) =>
+                        setState((p) => ({ ...p, pos: { ...p.pos, lonDeg: e.target.value } }))
+                      }
                     />
                     <input
                       className="mono"
                       placeholder="Lon'"
                       value={state.pos.lonMin}
-                      onChange={(e) => setState((p) => ({ ...p, pos: { ...p.pos, lonMin: e.target.value } }))}
+                      onChange={(e) =>
+                        setState((p) => ({ ...p, pos: { ...p.pos, lonMin: e.target.value } }))
+                      }
                     />
                     <select
                       value={state.pos.lonHem}
-                      onChange={(e) => setState((p) => ({ ...p, pos: { ...p.pos, lonHem: e.target.value as "E" | "W" } }))}
+                      onChange={(e) =>
+                        setState((p) => ({
+                          ...p,
+                          pos: { ...p.pos, lonHem: e.target.value as "E" | "W" },
+                        }))
+                      }
                     >
                       <option value="E">E</option>
                       <option value="W">W</option>
@@ -1394,7 +1536,9 @@ export default function App() {
                   <input
                     placeholder="Steering (°)"
                     value={entryFields.courseSteering}
-                    onChange={(e) => setEntryFields((p) => ({ ...p, courseSteering: e.target.value }))}
+                    onChange={(e) =>
+                      setEntryFields((p) => ({ ...p, courseSteering: e.target.value }))
+                    }
                   />
                   <input
                     placeholder="Speed (kt)"
@@ -1425,10 +1569,7 @@ export default function App() {
                     ))}
                   </select>
 
-                  <select
-                    value={entryFields.sea}
-                    onChange={(e) => setEntryFields((p) => ({ ...p, sea: e.target.value }))}
-                  >
+                  <select value={entryFields.sea} onChange={(e) => setEntryFields((p) => ({ ...p, sea: e.target.value }))}>
                     <option value="">Sea (m)…</option>
                     {BEAUFORT.map((b) => (
                       <option key={b.force} value={b.wave}>
@@ -1437,10 +1578,7 @@ export default function App() {
                     ))}
                   </select>
 
-                  <select
-                    value={entryFields.sky}
-                    onChange={(e) => setEntryFields((p) => ({ ...p, sky: e.target.value }))}
-                  >
+                  <select value={entryFields.sky} onChange={(e) => setEntryFields((p) => ({ ...p, sky: e.target.value }))}>
                     <option value="">Sky (Beaufort notation)…</option>
                     {SKY.map((s) => (
                       <option key={s.code} value={s.code}>
@@ -1643,7 +1781,15 @@ export default function App() {
                             <td>{r.seaTemp}</td>
                             <td>{r.engines}</td>
                             <td>{r.watchkeeper}</td>
-                            <td title={r.remarks} style={{ maxWidth: 420, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            <td
+                              title={r.remarks}
+                              style={{
+                                maxWidth: 420,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
                               {r.remarks || "—"}
                             </td>
                           </tr>
