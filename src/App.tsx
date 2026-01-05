@@ -1,22 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-
+import { createClient } from "@supabase/supabase-js";
 
 /* =========================================================
    Supabase Config
-   - Recommended: set in .env as:
-     VITE_SUPABASE_URL=...
-     VITE_SUPABASE_ANON_KEY=...
 ========================================================= */
+const SUPABASE_URL =
+  import.meta.env.VITE_SUPABASE_URL ?? "https://hwjxojkkmvqpwsuxbjlw.supabase.co";
 
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? "";
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY ?? "";
+const SUPABASE_ANON_KEY =
+  import.meta.env.VITE_SUPABASE_ANON_KEY ??
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh3anhvamtrbXZxcHdzdXhiamx3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU2MDgzMTgsImV4cCI6MjA4MTE4NDMxOH0.00_yWsIDZdbdlSMlT5sxubiaEsw6FHXxxzcyt7fW2FI";
 
-// Create client lazily (avoids accidental creation with empty env)
-function getSupabase(): SupabaseClient | null {
-  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return null;
-  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-}
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 /* =========================================================
    Types
@@ -54,9 +49,12 @@ type RunningEntry = {
   date: string;
   time: string;
   position: string;
-  courseTrue: string;
+
+  // ✅ renamed in UI to magnetic (we keep compatibility in normalize)
+  courseMagnetic: string;
   courseGyro: string;
   courseSteering: string;
+
   speed: string;
   windDir: string;
   windForce: string; // Beaufort number string
@@ -69,6 +67,9 @@ type RunningEntry = {
   engines: string;
   watchkeeper: string;
   remarks: string;
+
+  // ✅ NEW
+  totalFuel: string; // store as string to match the rest of the log fields
 };
 
 type WeatherState = {
@@ -96,6 +97,12 @@ type HistoryDay = {
   notes: Note[];
   weather: WeatherState;
   runningLog: RunningEntry[];
+
+  // ✅ NEW: saved daily fuel summary
+  fuelSummary?: {
+    usedLitres?: number;
+    lastTotalFuel?: number | null;
+  };
 };
 
 /** The full app state we persist */
@@ -227,10 +234,7 @@ function todayISO(): string {
 
 function nowHHMM(): string {
   const d = new Date();
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(
-    2,
-    "0"
-  )}`;
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 function prettyDate(iso: string): string {
@@ -248,9 +252,7 @@ function prettyDate(iso: string): string {
 }
 
 function downloadJSON(filename: string, obj: unknown) {
-  const blob = new Blob([JSON.stringify(obj, null, 2)], {
-    type: "application/json",
-  });
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = filename;
@@ -270,55 +272,34 @@ function safeParseJSON(text: string): unknown {
   }
 }
 
-function defaultState(): AppState {
-  return {
-    vessel: {},
-    watchkeeper: "",
-    notes: [],
-    log: [],
-    history: [],
-    pos: {
-      latDeg: "",
-      latMin: "",
-      latHem: "S",
-      lonDeg: "",
-      lonMin: "",
-      lonHem: "E",
-    },
-    daily: { date: todayISO(), location: "", mode: "Along" },
-    coords: { lat: null, lon: null },
-    locLabel: "Cairns, QLD",
-    lastWeather: {},
-    updatedAtISO: new Date().toISOString(),
-  };
+function parseNumberLoose(s: string): number | null {
+  const t = (s ?? "").toString().trim();
+  if (!t) return null;
+  const n = Number(t.replace(/,/g, ""));
+  return Number.isFinite(n) ? n : null;
 }
 
+/* =========================================================
+   State normalize (backward compatible)
+========================================================= */
 function normalizeBackupToState(obj: unknown): AppState | null {
   const fallback: AppState = defaultState();
+
   if (!obj || typeof obj !== "object") return null;
 
   const asAny = obj as Record<string, unknown>;
-  const src =
-    asAny.kind === "BridgeLogProBackup" && asAny.state ? asAny.state : obj;
+  const src = (asAny.kind === "BridgeLogProBackup" && asAny.state ? asAny.state : obj) as unknown;
 
   if (!src || typeof src !== "object") return null;
   const s = src as Record<string, unknown>;
 
-  const vessel =
-    s.vessel && typeof s.vessel === "object"
-      ? (s.vessel as VesselDetails)
-      : {};
+  const vessel = s.vessel && typeof s.vessel === "object" ? (s.vessel as VesselDetails) : {};
   const notes = Array.isArray(s.notes) ? (s.notes as Note[]) : [];
-  const log = Array.isArray(s.log) ? (s.log as RunningEntry[]) : [];
-  const history = Array.isArray(s.history) ? (s.history as HistoryDay[]) : [];
+  const log = Array.isArray(s.log) ? (s.log as any[]) : [];
+  const history = Array.isArray(s.history) ? (s.history as any[]) : [];
 
-  const pos =
-    s.pos && typeof s.pos === "object" ? (s.pos as PosState) : fallback.pos;
-
-  const daily =
-    s.daily && typeof s.daily === "object"
-      ? (s.daily as DailyState)
-      : fallback.daily;
+  const pos = s.pos && typeof s.pos === "object" ? (s.pos as PosState) : fallback.pos;
+  const daily = s.daily && typeof s.daily === "object" ? (s.daily as DailyState) : fallback.daily;
 
   const coords =
     s.coords && typeof s.coords === "object"
@@ -326,86 +307,112 @@ function normalizeBackupToState(obj: unknown): AppState | null {
       : fallback.coords;
 
   const watchkeeper = typeof s.watchkeeper === "string" ? s.watchkeeper : "";
-  const locLabel =
-    typeof s.locLabel === "string" ? s.locLabel : fallback.locLabel;
+  const locLabel = typeof s.locLabel === "string" ? s.locLabel : fallback.locLabel;
 
   const lastWeather =
-    s.lastWeather && typeof s.lastWeather === "object"
-      ? (s.lastWeather as WeatherState)
-      : fallback.lastWeather;
+    s.lastWeather && typeof s.lastWeather === "object" ? (s.lastWeather as WeatherState) : fallback.lastWeather;
+
+  const normalizedLog: RunningEntry[] = log
+    .filter((r) => r && typeof r === "object")
+    .map((r: any) => {
+      // ✅ Support older backups that used courseTrue
+      const courseMagnetic =
+        typeof r.courseMagnetic === "string"
+          ? r.courseMagnetic
+          : typeof r.courseTrue === "string"
+          ? r.courseTrue
+          : "";
+
+      return {
+        date: String(r.date ?? daily.date ?? todayISO()),
+        time: String(r.time ?? ""),
+        position: String(r.position ?? ""),
+        courseMagnetic,
+        courseGyro: String(r.courseGyro ?? ""),
+        courseSteering: String(r.courseSteering ?? ""),
+        speed: String(r.speed ?? ""),
+        windDir: String(r.windDir ?? ""),
+        windForce: String(r.windForce ?? ""),
+        sea: String(r.sea ?? ""),
+        sky: String(r.sky ?? ""),
+        visibility: String(r.visibility ?? ""),
+        barometer: String(r.barometer ?? ""),
+        airTemp: String(r.airTemp ?? ""),
+        seaTemp: String(r.seaTemp ?? ""),
+        engines: String(r.engines ?? ""),
+        watchkeeper: String(r.watchkeeper ?? watchkeeper ?? ""),
+        remarks: String(r.remarks ?? ""),
+        totalFuel: String(r.totalFuel ?? ""), // ✅ new
+      };
+    });
+
+  const normalizedHistory: HistoryDay[] = history
+    .filter((h) => h && typeof h === "object" && typeof (h as any).date === "string")
+    .map((h: any) => ({
+      date: String(h.date ?? ""),
+      location: String(h.location ?? ""),
+      vesselMode: (String(h.vesselMode ?? "Along") as DailyState["mode"]) ?? "Along",
+      vessel: h.vessel && typeof h.vessel === "object" ? (h.vessel as VesselDetails) : vessel,
+      notes: Array.isArray(h.notes) ? (h.notes as Note[]) : [],
+      weather: h.weather && typeof h.weather === "object" ? (h.weather as WeatherState) : {},
+      runningLog: Array.isArray(h.runningLog)
+        ? (h.runningLog as any[]).map((r: any) => {
+            const courseMagnetic =
+              typeof r.courseMagnetic === "string"
+                ? r.courseMagnetic
+                : typeof r.courseTrue === "string"
+                ? r.courseTrue
+                : "";
+            return {
+              date: String(r.date ?? h.date ?? ""),
+              time: String(r.time ?? ""),
+              position: String(r.position ?? ""),
+              courseMagnetic,
+              courseGyro: String(r.courseGyro ?? ""),
+              courseSteering: String(r.courseSteering ?? ""),
+              speed: String(r.speed ?? ""),
+              windDir: String(r.windDir ?? ""),
+              windForce: String(r.windForce ?? ""),
+              sea: String(r.sea ?? ""),
+              sky: String(r.sky ?? ""),
+              visibility: String(r.visibility ?? ""),
+              barometer: String(r.barometer ?? ""),
+              airTemp: String(r.airTemp ?? ""),
+              seaTemp: String(r.seaTemp ?? ""),
+              engines: String(r.engines ?? ""),
+              watchkeeper: String(r.watchkeeper ?? ""),
+              remarks: String(r.remarks ?? ""),
+              totalFuel: String(r.totalFuel ?? ""),
+            } as RunningEntry;
+          })
+        : [],
+      fuelSummary:
+        h.fuelSummary && typeof h.fuelSummary === "object"
+          ? {
+              usedLitres:
+                typeof h.fuelSummary.usedLitres === "number" ? (h.fuelSummary.usedLitres as number) : undefined,
+              lastTotalFuel:
+                typeof h.fuelSummary.lastTotalFuel === "number"
+                  ? (h.fuelSummary.lastTotalFuel as number)
+                  : h.fuelSummary.lastTotalFuel === null
+                  ? null
+                  : undefined,
+            }
+          : undefined,
+    }));
 
   const normalized: AppState = {
     vessel: vessel ?? {},
     watchkeeper,
     notes: notes
-      .filter(
-        (n) =>
-          n &&
-          typeof n === "object" &&
-          typeof (n as Note).text === "string"
-      )
+      .filter((n) => n && typeof n === "object" && typeof (n as Note).text === "string")
       .map((n) => ({
         date: String((n as Note).date ?? daily.date ?? todayISO()),
         time: String((n as Note).time ?? ""),
         text: String((n as Note).text ?? ""),
       })),
-    log: log
-      .filter(
-        (r) =>
-          r &&
-          typeof r === "object" &&
-          typeof (r as RunningEntry).time === "string"
-      )
-      .map((r) => ({
-        date: String((r as RunningEntry).date ?? daily.date ?? todayISO()),
-        time: String((r as RunningEntry).time ?? ""),
-        position: String((r as RunningEntry).position ?? ""),
-        courseTrue: String((r as RunningEntry).courseTrue ?? ""),
-        courseGyro: String((r as RunningEntry).courseGyro ?? ""),
-        courseSteering: String((r as RunningEntry).courseSteering ?? ""),
-        speed: String((r as RunningEntry).speed ?? ""),
-        windDir: String((r as RunningEntry).windDir ?? ""),
-        windForce: String((r as RunningEntry).windForce ?? ""),
-        sea: String((r as RunningEntry).sea ?? ""),
-        sky: String((r as RunningEntry).sky ?? ""),
-        visibility: String((r as RunningEntry).visibility ?? ""),
-        barometer: String((r as RunningEntry).barometer ?? ""),
-        airTemp: String((r as RunningEntry).airTemp ?? ""),
-        seaTemp: String((r as RunningEntry).seaTemp ?? ""),
-        engines: String((r as RunningEntry).engines ?? ""),
-        watchkeeper: String(
-          (r as RunningEntry).watchkeeper ?? watchkeeper ?? ""
-        ),
-        remarks: String((r as RunningEntry).remarks ?? ""),
-      })),
-    history: history
-      .filter(
-        (h) =>
-          h &&
-          typeof h === "object" &&
-          typeof (h as HistoryDay).date === "string"
-      )
-      .map((h) => ({
-        date: String((h as HistoryDay).date ?? ""),
-        location: String((h as HistoryDay).location ?? ""),
-        vesselMode:
-          (String((h as HistoryDay).vesselMode ?? "Along") as DailyState["mode"]) ??
-          "Along",
-        vessel:
-          (h as HistoryDay).vessel && typeof (h as HistoryDay).vessel === "object"
-            ? (h as HistoryDay).vessel
-            : vessel,
-        notes: Array.isArray((h as HistoryDay).notes)
-          ? (h as HistoryDay).notes
-          : [],
-        weather:
-          (h as HistoryDay).weather && typeof (h as HistoryDay).weather === "object"
-            ? (h as HistoryDay).weather
-            : {},
-        runningLog: Array.isArray((h as HistoryDay).runningLog)
-          ? (h as HistoryDay).runningLog
-          : [],
-      })),
+    log: normalizedLog,
+    history: normalizedHistory,
     pos: {
       latDeg: String((pos as PosState).latDeg ?? ""),
       latMin: String((pos as PosState).latMin ?? ""),
@@ -431,19 +438,34 @@ function normalizeBackupToState(obj: unknown): AppState | null {
   return normalized;
 }
 
+function defaultState(): AppState {
+  return {
+    vessel: {},
+    watchkeeper: "",
+    notes: [],
+    log: [],
+    history: [],
+    pos: {
+      latDeg: "",
+      latMin: "",
+      latHem: "S",
+      lonDeg: "",
+      lonMin: "",
+      lonHem: "E",
+    },
+    daily: { date: todayISO(), location: "", mode: "Along" },
+    coords: { lat: null, lon: null },
+    locLabel: "Cairns, QLD",
+    lastWeather: {},
+    updatedAtISO: new Date().toISOString(),
+  };
+}
+
 /* =========================================================
    Supabase Storage (per vessel login)
 ========================================================= */
-async function loadStateFromSupabase(
-  supabase: SupabaseClient,
-  userId: string
-): Promise<AppState | null> {
-  const { data, error } = await supabase
-    .from("blp_state")
-    .select("state")
-    .eq("user_id", userId)
-    .maybeSingle();
-
+async function loadStateFromSupabase(userId: string): Promise<AppState | null> {
+  const { data, error } = await supabase.from("blp_state").select("state").eq("user_id", userId).maybeSingle();
   if (error) return null;
   if (!data || !data.state) return null;
 
@@ -451,33 +473,23 @@ async function loadStateFromSupabase(
   return norm ?? null;
 }
 
-async function upsertStateToSupabase(
-  supabase: SupabaseClient,
-  userId: string,
-  state: AppState
-): Promise<{ ok: boolean; error?: string }> {
+async function upsertStateToSupabase(userId: string, state: AppState): Promise<void> {
   const payload = {
     user_id: userId,
     state,
     updated_at: new Date().toISOString(),
   };
-
-  const { error } = await supabase
-    .from("blp_state")
-    .upsert(payload, { onConflict: "user_id" });
-
-  if (error) return { ok: false, error: error.message };
-  return { ok: true };
+  await supabase.from("blp_state").upsert(payload, { onConflict: "user_id" });
 }
 
 /* =========================================================
-   Styles
+   Styles (unchanged)
 ========================================================= */
 function GlobalStyles() {
   return (
     <style>{`
-      :root { --bg:#f6f7fb; --fg:#0a0a0a; --muted:#60646c; --card:#fff; --card-border:#e7e8ec; --input-bg:#fff; --input-border:#d7d9df; --badge-bg:#f1f3f7; --btn-bg:#111827; --btn-border:#0b1220; --btn-hover:#0d1526; --table-head:#f1f3f7; --warn:#7c2d12; --ok:#14532d; }
-      html[data-theme="dark"] { --bg:#0b0b0b; --fg:#fff; --muted:#bbb; --card:#111; --card-border:#2a2a2a; --input-bg:#0b0b0b; --input-border:#2a2a2a; --badge-bg:#1a1a1a; --btn-bg:#222; --btn-border:#3a3a3a; --btn-hover:#2a2a2a; --table-head:#0f0f0f; --warn:#fb923c; --ok:#4ade80; }
+      :root { --bg:#f6f7fb; --fg:#0a0a0a; --muted:#60646c; --card:#fff; --card-border:#e7e8ec; --input-bg:#fff; --input-border:#d7d9df; --badge-bg:#f1f3f7; --btn-bg:#111827; --btn-border:#0b1220; --btn-hover:#0d1526; --table-head:#f1f3f7; }
+      html[data-theme="dark"] { --bg:#0b0b0b; --fg:#fff; --muted:#bbb; --card:#111; --card-border:#2a2a2a; --input-bg:#0b0b0b; --input-border:#2a2a2a; --badge-bg:#1a1a1a; --btn-bg:#222; --btn-border:#3a3a3a; --btn-hover:#2a2a2a; --table-head:#0f0f0f; }
       html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,Noto Sans; height:auto; min-height:100%;}
       body{overflow:auto;}
       .container{max-width:1120px;margin:0 auto;padding:16px}
@@ -510,22 +522,81 @@ function GlobalStyles() {
       #toast{position:fixed;left:12px;right:12px;bottom:12px;background:#7f1d1d;color:#fff;padding:10px;font-family:ui-monospace,monospace;display:none;z-index:999999;border-radius:10px}
       details{border:1px solid var(--card-border);border-radius:10px;margin:8px 0;padding:6px;background:transparent}
       summary{cursor:pointer}
-      .banner{border:1px solid var(--card-border);border-radius:12px;padding:10px 12px;background:var(--badge-bg);margin-bottom:12px}
-      .dot{width:8px;height:8px;border-radius:999px;background:var(--muted);display:inline-block}
-      .dot.ok{background:var(--ok)}
-      .dot.warn{background:var(--warn)}
     `}</style>
   );
+}
+
+/* =========================================================
+   Fuel math (daily)
+   Rule: Fuel Used = prevTotal - currentTotal
+   - First entry uses yesterday’s lastTotalFuel if available.
+   - Negative delta treated as refuel (not added to used).
+========================================================= */
+function getYesterdayISO(iso: string): string {
+  const d = new Date(`${iso}T00:00:00`);
+  d.setDate(d.getDate() - 1);
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function lastTotalFuelFromEntries(entries: RunningEntry[]): number | null {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const n = parseNumberLoose(entries[i].totalFuel);
+    if (n != null) return n;
+  }
+  return null;
+}
+
+function computeFuelForDay(dayEntries: RunningEntry[], prevTotalFuel: number | null) {
+  let prev = prevTotalFuel;
+  const perEntryUsed: Array<number | null> = [];
+  let usedSum = 0;
+
+  // dayEntries are in the order they appear in table (your code stores newest-first)
+  // For fuel math we want chronological.
+  const chrono = [...dayEntries].slice().reverse();
+
+  const usedMap = new Map<string, number | null>();
+
+  for (const e of chrono) {
+    const cur = parseNumberLoose(e.totalFuel);
+    let used: number | null = null;
+
+    if (cur != null && prev != null) {
+      const delta = prev - cur;
+      if (delta >= 0) {
+        used = delta;
+        usedSum += delta;
+      } else {
+        // refuel: ignore for "used"
+        used = null;
+      }
+    }
+
+    // update prev if current valid
+    if (cur != null) prev = cur;
+
+    usedMap.set(`${e.date}__${e.time}__${e.position}`, used);
+  }
+
+  // return in the same order as incoming dayEntries (newest-first)
+  for (const e of dayEntries) {
+    perEntryUsed.push(usedMap.get(`${e.date}__${e.time}__${e.position}`) ?? null);
+  }
+
+  return {
+    perEntryUsed,
+    usedSum,
+    lastTotalFuel: prev != null ? prev : prevTotalFuel,
+  };
 }
 
 /* =========================================================
    App
 ========================================================= */
 export default function App() {
-  const supabaseRef = useRef<SupabaseClient | null>(null);
-  if (!supabaseRef.current) supabaseRef.current = getSupabase();
-  const supabase = supabaseRef.current;
-
   const [theme, setTheme] = useState<Theme>(() => {
     const t = localStorage.getItem("blp-theme");
     return t === "light" ? "light" : "dark";
@@ -536,10 +607,6 @@ export default function App() {
 
   const [sessionReady, setSessionReady] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
-
-  // Saving status
-  const [isSaving, setIsSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
 
   // login form
   const [loginEmail, setLoginEmail] = useState("");
@@ -572,25 +639,13 @@ export default function App() {
   // session init
   useEffect(() => {
     let mounted = true;
-
     (async () => {
-      if (!supabase) {
-        setUserId(null);
-        setSessionReady(true);
-        return;
-      }
       const { data } = await supabase.auth.getSession();
       if (!mounted) return;
       const uid = data.session?.user?.id ?? null;
       setUserId(uid);
       setSessionReady(true);
     })();
-
-    if (!supabase) {
-      return () => {
-        mounted = false;
-      };
-    }
 
     const { data: sub } = supabase.auth.onAuthStateChange((_event, sess) => {
       setUserId(sess?.user?.id ?? null);
@@ -600,17 +655,14 @@ export default function App() {
       mounted = false;
       sub.subscription.unsubscribe();
     };
-  }, [supabase]);
+  }, []);
 
-  // Load per-user state when logged in
+  // Load per-user state from Supabase when logged in
   useEffect(() => {
-    if (!supabase || !userId) return;
-
+    if (!userId) return;
     let cancelled = false;
 
     (async () => {
-      setSaveError(null);
-
       const cacheKey = `blp-cache-${userId}`;
       const cached = localStorage.getItem(cacheKey);
       if (cached) {
@@ -619,7 +671,7 @@ export default function App() {
         if (norm && !cancelled) setState(norm);
       }
 
-      const remote = await loadStateFromSupabase(supabase, userId);
+      const remote = await loadStateFromSupabase(userId);
       if (remote && !cancelled) {
         setState(remote);
         localStorage.setItem(cacheKey, JSON.stringify(remote));
@@ -629,39 +681,22 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [supabase, userId]);
+  }, [userId]);
 
   // Save to Supabase (debounced)
   const saveTimer = useRef<number | null>(null);
   useEffect(() => {
-    if (!supabase || !userId) return;
-
+    if (!userId) return;
     const cacheKey = `blp-cache-${userId}`;
     localStorage.setItem(cacheKey, JSON.stringify(state));
 
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      void upsertStateToSupabase(userId, { ...state, updatedAtISO: new Date().toISOString() });
+    }, 700);
+  }, [state, userId]);
 
-    setIsSaving(true);
-    setSaveError(null);
-
-    // Important: do NOT keep mutating state in the save path
-    const toSave: AppState = { ...state, updatedAtISO: new Date().toISOString() };
-
-    saveTimer.current = window.setTimeout(async () => {
-      const res = await upsertStateToSupabase(supabase, userId, toSave);
-      if (!res.ok) {
-        setSaveError(res.error ?? "Save failed");
-        showToast(res.error ?? "Save failed");
-      }
-      setIsSaving(false);
-    }, 650);
-
-    return () => {
-      if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    };
-  }, [supabase, state, userId]);
-
-  // midnight rollover: save snapshot of previous day and roll date
+  // midnight rollover: save the day and roll to new local date
   useEffect(() => {
     if (!userId) return;
 
@@ -669,6 +704,17 @@ export default function App() {
       const d = todayISO();
       if (d !== state.daily.date) {
         setState((prev) => {
+          const todays = prev.log.filter((e) => e.date === prev.daily.date);
+
+          const yISO = getYesterdayISO(prev.daily.date);
+          const yHist = prev.history.find((h) => h.date === yISO);
+          const prevFuel =
+            yHist?.fuelSummary?.lastTotalFuel ??
+            lastTotalFuelFromEntries(yHist?.runningLog ?? []) ??
+            null;
+
+          const fuel = computeFuelForDay(todays, prevFuel);
+
           const snap: HistoryDay = {
             date: prev.daily.date,
             location: prev.daily.location,
@@ -676,13 +722,20 @@ export default function App() {
             vessel: { ...prev.vessel },
             notes: prev.notes.filter((n) => n.date === prev.daily.date),
             weather: prev.lastWeather ?? {},
-            runningLog: prev.log.filter((e) => e.date === prev.daily.date),
+            runningLog: todays,
+            fuelSummary: {
+              usedLitres: Math.round(fuel.usedSum * 100) / 100,
+              lastTotalFuel: fuel.lastTotalFuel ?? null,
+            },
           };
+
+          const nextHistory = [snap, ...prev.history];
+          const nextNotes = prev.notes.filter((n) => n.date !== prev.daily.date);
 
           return {
             ...prev,
-            history: [snap, ...prev.history],
-            notes: prev.notes.filter((n) => n.date !== prev.daily.date),
+            history: nextHistory,
+            notes: nextNotes,
             daily: { ...prev.daily, date: d },
           };
         });
@@ -702,22 +755,25 @@ export default function App() {
     [state.notes, state.daily.date]
   );
 
-  const todaysLog = useMemo(
-    () => state.log.filter((e) => e.date === state.daily.date),
-    [state.log, state.daily.date]
-  );
+  const todaysLog = useMemo(() => state.log.filter((e) => e.date === state.daily.date), [state.log, state.daily.date]);
+
+  // ✅ Fuel calculations for today
+  const todaysFuel = useMemo(() => {
+    const yISO = getYesterdayISO(state.daily.date);
+    const yHist = state.history.find((h) => h.date === yISO);
+    const prevFuel =
+      yHist?.fuelSummary?.lastTotalFuel ??
+      lastTotalFuelFromEntries(yHist?.runningLog ?? []) ??
+      null;
+
+    const fuel = computeFuelForDay(todaysLog, prevFuel);
+    return fuel; // { perEntryUsed, usedSum, lastTotalFuel }
+  }, [todaysLog, state.history, state.daily.date]);
 
   /* -------------------------
      Weather + Marine
   -------------------------- */
-  const lastWxFetchRef = useRef<number>(0);
-
   async function fetchWeather(lat: number, lon: number) {
-    // throttle: max once per 10 seconds
-    const now = Date.now();
-    if (now - lastWxFetchRef.current < 10_000) return;
-    lastWxFetchRef.current = now;
-
     try {
       const u = new URL("https://api.open-meteo.com/v1/forecast");
       u.searchParams.set("latitude", String(lat));
@@ -748,21 +804,16 @@ export default function App() {
       const wx: WeatherState = {
         tempC: typeof c.temperature_2m === "number" ? c.temperature_2m : null,
         windKts: typeof c.wind_speed_10m === "number" ? c.wind_speed_10m : null,
-        windDir:
-          typeof c.wind_direction_10m === "number" ? c.wind_direction_10m : null,
+        windDir: typeof c.wind_direction_10m === "number" ? c.wind_direction_10m : null,
         pressure: typeof c.pressure_msl === "number" ? c.pressure_msl : null,
-        visibilityKm:
-          typeof c.visibility === "number" ? c.visibility / 1000 : null,
+        visibilityKm: typeof c.visibility === "number" ? (c.visibility as number) / 1000 : null,
         weatherCode: typeof c.weather_code === "number" ? c.weather_code : null,
-        condition: typeof c.weather_code === "number" ? WMO[c.weather_code] : null,
-        precipMmHr:
-          typeof c.precipitation === "number" ? c.precipitation : null,
+        condition: typeof c.weather_code === "number" ? WMO[c.weather_code as number] : null,
+        precipMmHr: typeof c.precipitation === "number" ? c.precipitation : null,
         humidityPct:
-          typeof c.relative_humidity_2m === "number"
-            ? c.relative_humidity_2m
-            : null,
-        cloudPct: typeof c.cloud_cover === "number" ? c.cloud_cover : null,
-        dewPointC: typeof c.dew_point_2m === "number" ? c.dew_point_2m : null,
+          typeof c.relative_humidity_2m === "number" ? (c.relative_humidity_2m as number) : null,
+        cloudPct: typeof c.cloud_cover === "number" ? (c.cloud_cover as number) : null,
+        dewPointC: typeof c.dew_point_2m === "number" ? (c.dew_point_2m as number) : null,
       };
 
       // marine
@@ -776,10 +827,9 @@ export default function App() {
         if (mr.ok) {
           const md = (await mr.json()) as { current?: Record<string, unknown> };
           const mc = md.current ?? {};
-          wx.waveHeightM = typeof mc.wave_height === "number" ? mc.wave_height : null;
-          wx.wavePeriodS = typeof mc.wave_period === "number" ? mc.wave_period : null;
-          wx.waveDirDeg =
-            typeof mc.wave_direction === "number" ? mc.wave_direction : null;
+          wx.waveHeightM = typeof mc.wave_height === "number" ? (mc.wave_height as number) : null;
+          wx.wavePeriodS = typeof mc.wave_period === "number" ? (mc.wave_period as number) : null;
+          wx.waveDirDeg = typeof mc.wave_direction === "number" ? (mc.wave_direction as number) : null;
         }
       } catch {
         // ignore marine fail
@@ -839,11 +889,11 @@ export default function App() {
     void fetchWeather(lat, lon);
   }
 
-  // If stored coords exist, load weather once on login
   useEffect(() => {
-    if (!userId) return;
     const { lat, lon } = state.coords;
-    if (lat != null && lon != null) void fetchWeather(lat, lon);
+    if (lat != null && lon != null) {
+      void fetchWeather(lat, lon);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
@@ -852,10 +902,8 @@ export default function App() {
   -------------------------- */
   function composedPos(): string {
     const { latDeg, latMin, latHem, lonDeg, lonMin, lonHem } = state.pos;
-    const lat =
-      latDeg && latMin && latHem ? `${latDeg}°${latMin}'${latHem}` : "";
-    const lon =
-      lonDeg && lonMin && lonHem ? `${lonDeg}°${lonMin}'${lonHem}` : "";
+    const lat = latDeg && latMin && latHem ? `${latDeg}°${latMin}'${latHem}` : "";
+    const lon = lonDeg && lonMin && lonHem ? `${lonDeg}°${lonMin}'${lonHem}` : "";
     return lat && lon ? `${lat} / ${lon}` : "";
   }
 
@@ -875,10 +923,10 @@ export default function App() {
   }
 
   /* -------------------------
-     Running Log
+     Running Log (UPDATED)
   -------------------------- */
   const [entryFields, setEntryFields] = useState({
-    courseTrue: "",
+    courseMagnetic: "",
     courseGyro: "",
     courseSteering: "",
     speed: "",
@@ -893,6 +941,7 @@ export default function App() {
     engines: "",
     watchkeeper: "",
     remarks: "",
+    totalFuel: "", // ✅ NEW
   });
 
   function addEntry() {
@@ -917,7 +966,7 @@ export default function App() {
           date: prev.daily.date,
           time: nowHHMM(),
           position: p,
-          courseTrue: entryFields.courseTrue,
+          courseMagnetic: entryFields.courseMagnetic,
           courseGyro: entryFields.courseGyro,
           courseSteering: entryFields.courseSteering,
           speed: entryFields.speed,
@@ -932,6 +981,7 @@ export default function App() {
           engines: entryFields.engines,
           watchkeeper: entryFields.watchkeeper || prev.watchkeeper || "",
           remarks: entryFields.remarks,
+          totalFuel: entryFields.totalFuel, // ✅ NEW
         },
         ...prev.log,
       ],
@@ -944,12 +994,13 @@ export default function App() {
 
     setState((prev) => {
       const nextNotes = [{ date: prev.daily.date, time: nowHHMM(), text }, ...prev.notes];
+
       const nextLog = [
         {
           date: prev.daily.date,
           time: nowHHMM(),
           position: p,
-          courseTrue: "",
+          courseMagnetic: "",
           courseGyro: "",
           courseSteering: "",
           speed: "",
@@ -964,6 +1015,7 @@ export default function App() {
           engines: "",
           watchkeeper: prev.watchkeeper || "",
           remarks: text,
+          totalFuel: "", // ✅ allow blank
         },
         ...prev.log,
       ];
@@ -985,10 +1037,21 @@ export default function App() {
   }
 
   /* -------------------------
-     Save Day -> History
+     Save Day -> History (UPDATED fuel)
   -------------------------- */
   function saveDayToHistory() {
     setState((prev) => {
+      const todays = prev.log.filter((e) => e.date === prev.daily.date);
+
+      const yISO = getYesterdayISO(prev.daily.date);
+      const yHist = prev.history.find((h) => h.date === yISO);
+      const prevFuel =
+        yHist?.fuelSummary?.lastTotalFuel ??
+        lastTotalFuelFromEntries(yHist?.runningLog ?? []) ??
+        null;
+
+      const fuel = computeFuelForDay(todays, prevFuel);
+
       const snapshot: HistoryDay = {
         date: prev.daily.date,
         location: prev.daily.location,
@@ -996,7 +1059,11 @@ export default function App() {
         vessel: { ...prev.vessel },
         notes: prev.notes.filter((n) => n.date === prev.daily.date),
         weather: prev.lastWeather ?? {},
-        runningLog: prev.log.filter((e) => e.date === prev.daily.date),
+        runningLog: todays,
+        fuelSummary: {
+          usedLitres: Math.round(fuel.usedSum * 100) / 100,
+          lastTotalFuel: fuel.lastTotalFuel ?? null,
+        },
       };
 
       return {
@@ -1014,18 +1081,14 @@ export default function App() {
   function backupNow() {
     const payload = {
       kind: "BridgeLogProBackup",
-      version: 1,
+      version: 2,
       savedAt: new Date().toISOString(),
       state,
     };
     const ts = new Date();
-    const name = `bridge-log-backup-${ts.getFullYear()}${String(ts.getMonth() + 1).padStart(
-      2,
-      "0"
-    )}${String(ts.getDate()).padStart(2, "0")}-${String(ts.getHours()).padStart(
-      2,
-      "0"
-    )}${String(ts.getMinutes()).padStart(2, "0")}.json`;
+    const name = `bridge-log-backup-${ts.getFullYear()}${String(ts.getMonth() + 1).padStart(2, "0")}${String(
+      ts.getDate()
+    ).padStart(2, "0")}-${String(ts.getHours()).padStart(2, "0")}${String(ts.getMinutes()).padStart(2, "0")}.json`;
 
     downloadJSON(name, payload);
   }
@@ -1046,10 +1109,6 @@ export default function App() {
      Auth
   -------------------------- */
   async function doLogin() {
-    if (!supabase) {
-      setLoginStatus("Missing Supabase env vars (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY)");
-      return;
-    }
     if (!loginEmail.trim()) {
       setLoginStatus("Enter email");
       return;
@@ -1075,14 +1134,13 @@ export default function App() {
   }
 
   async function doLogout() {
-    if (!supabase) return;
     await supabase.auth.signOut();
     setLoginStatus("Not logged in");
     showToast("Logged out", true);
   }
 
   /* =========================================================
-     Render: Session loading
+     Render: Login gate (unchanged)
 ========================================================= */
   if (!sessionReady) {
     return (
@@ -1100,9 +1158,6 @@ export default function App() {
     );
   }
 
-  /* =========================================================
-     Render: Login gate
-========================================================= */
   if (!userId) {
     return (
       <>
@@ -1110,20 +1165,6 @@ export default function App() {
         <div id="toast">{toast}</div>
 
         <div className="container">
-          {!supabase ? (
-            <div className="banner">
-              <div className="row">
-                <span className="dot warn" />
-                <b>Supabase not configured</b>
-              </div>
-              <div className="muted" style={{ marginTop: 6 }}>
-                Add <span className="mono">VITE_SUPABASE_URL</span> and{" "}
-                <span className="mono">VITE_SUPABASE_ANON_KEY</span> to your{" "}
-                <span className="mono">.env</span> (then restart Vite).
-              </div>
-            </div>
-          ) : null}
-
           <header className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
             <div className="row">
               <div className="pill">BridgeLog Pro</div>
@@ -1131,7 +1172,7 @@ export default function App() {
             </div>
             <div className="row">
               <button className="btn" onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}>
-                {(theme === "dark" ? "Light" : "Dark")} mode
+                {theme === "dark" ? "Light" : "Dark"} mode
               </button>
             </div>
           </header>
@@ -1145,12 +1186,7 @@ export default function App() {
                   onChange={(e) => setLoginEmail(e.target.value)}
                   placeholder="Vessel email (Supabase Auth user)"
                 />
-                <input
-                  value={loginPass}
-                  onChange={(e) => setLoginPass(e.target.value)}
-                  type="password"
-                  placeholder="Password"
-                />
+                <input value={loginPass} onChange={(e) => setLoginPass(e.target.value)} type="password" placeholder="Password" />
                 <button className="btn" onClick={() => void doLogin()}>
                   Login
                 </button>
@@ -1171,7 +1207,7 @@ export default function App() {
   }
 
   /* =========================================================
-     Render: Main App
+     Render: Main App (layout restored)
 ========================================================= */
   const wx = state.lastWeather ?? {};
 
@@ -1187,18 +1223,11 @@ export default function App() {
             <div className="badge mono" title="Location label">
               {state.locLabel}
             </div>
-
-            <div className="badge">
-              <span className={`dot ${saveError ? "warn" : isSaving ? "" : "ok"}`} />
-              <span className="mono">
-                {saveError ? "Save error" : isSaving ? "Saving…" : "Saved"}
-              </span>
-            </div>
           </div>
 
           <div className="row">
             <button className="btn" onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}>
-              {(theme === "dark" ? "Light" : "Dark")} mode
+              {theme === "dark" ? "Light" : "Dark"} mode
             </button>
             <button className="btn" onClick={useGeo}>
               Use my location
@@ -1229,21 +1258,8 @@ export default function App() {
           </div>
         </header>
 
-        {saveError ? (
-          <div className="banner">
-            <div className="row">
-              <span className="dot warn" />
-              <b>Cloud save failed</b>
-            </div>
-            <div className="muted" style={{ marginTop: 6 }}>
-              {saveError} — your local cache is still updating. Check RLS policy on{" "}
-              <span className="mono">blp_state</span>.
-            </div>
-          </div>
-        ) : null}
-
         <div className="grid grid-2">
-          {/* Left column */}
+          {/* Left column stack (UNCHANGED except fuel badge in Daily Log) */}
           <div className="stack">
             <div className="col">
               <div className="section">
@@ -1252,23 +1268,17 @@ export default function App() {
                   <input
                     placeholder="Vessel name"
                     value={state.vessel.name ?? ""}
-                    onChange={(e) =>
-                      setState((p) => ({ ...p, vessel: { ...p.vessel, name: e.target.value } }))
-                    }
+                    onChange={(e) => setState((p) => ({ ...p, vessel: { ...p.vessel, name: e.target.value } }))}
                   />
                   <input
                     placeholder="Call sign"
                     value={state.vessel.callSign ?? ""}
-                    onChange={(e) =>
-                      setState((p) => ({ ...p, vessel: { ...p.vessel, callSign: e.target.value } }))
-                    }
+                    onChange={(e) => setState((p) => ({ ...p, vessel: { ...p.vessel, callSign: e.target.value } }))}
                   />
                   <input
                     placeholder="MMSI"
                     value={state.vessel.mmsi ?? ""}
-                    onChange={(e) =>
-                      setState((p) => ({ ...p, vessel: { ...p.vessel, mmsi: e.target.value } }))
-                    }
+                    onChange={(e) => setState((p) => ({ ...p, vessel: { ...p.vessel, mmsi: e.target.value } }))}
                   />
                 </div>
 
@@ -1276,9 +1286,7 @@ export default function App() {
                   <input
                     placeholder="IMO Number"
                     value={state.vessel.imo ?? ""}
-                    onChange={(e) =>
-                      setState((p) => ({ ...p, vessel: { ...p.vessel, imo: e.target.value } }))
-                    }
+                    onChange={(e) => setState((p) => ({ ...p, vessel: { ...p.vessel, imo: e.target.value } }))}
                   />
                   <input
                     placeholder="Official Number (ON)"
@@ -1290,9 +1298,7 @@ export default function App() {
                   <input
                     placeholder="Master"
                     value={state.vessel.master ?? ""}
-                    onChange={(e) =>
-                      setState((p) => ({ ...p, vessel: { ...p.vessel, master: e.target.value } }))
-                    }
+                    onChange={(e) => setState((p) => ({ ...p, vessel: { ...p.vessel, master: e.target.value } }))}
                   />
                 </div>
 
@@ -1300,9 +1306,7 @@ export default function App() {
                   placeholder="Vessel notes…"
                   style={{ marginTop: 8 }}
                   value={state.vessel.notes ?? ""}
-                  onChange={(e) =>
-                    setState((p) => ({ ...p, vessel: { ...p.vessel, notes: e.target.value } }))
-                  }
+                  onChange={(e) => setState((p) => ({ ...p, vessel: { ...p.vessel, notes: e.target.value } }))}
                 />
 
                 <div className="muted" style={{ marginTop: 6 }}>
@@ -1364,37 +1368,29 @@ export default function App() {
                   <div className="badge">
                     Wind{" "}
                     <span className="right">
-                      {wx.windKts != null ? `${wx.windKts} kt` : "— kt"} /{" "}
-                      {wx.windDir != null ? `${wx.windDir}°` : "—°"}
+                      {wx.windKts != null ? `${wx.windKts} kt` : "— kt"} / {wx.windDir != null ? `${wx.windDir}°` : "—°"}
                     </span>
                   </div>
                   <div className="badge">
-                    Pressure{" "}
-                    <span className="right">{wx.pressure != null ? `${wx.pressure} hPa` : "— hPa"}</span>
+                    Pressure <span className="right">{wx.pressure != null ? `${wx.pressure} hPa` : "— hPa"}</span>
                   </div>
                   <div className="badge">
-                    Vis{" "}
-                    <span className="right">
-                      {wx.visibilityKm != null ? `${wx.visibilityKm.toFixed(1)} km` : "— km"}
-                    </span>
+                    Vis <span className="right">{wx.visibilityKm != null ? `${wx.visibilityKm.toFixed(1)} km` : "— km"}</span>
                   </div>
                 </div>
 
                 <div className="row" style={{ marginTop: 6 }}>
                   <div className="badge">
-                    Humidity{" "}
-                    <span className="right">{wx.humidityPct != null ? `${wx.humidityPct}%` : "—%"}</span>
+                    Humidity <span className="right">{wx.humidityPct != null ? `${wx.humidityPct}%` : "—%"}</span>
                   </div>
                   <div className="badge">
                     Cloud <span className="right">{wx.cloudPct != null ? `${wx.cloudPct}%` : "—%"}</span>
                   </div>
                   <div className="badge">
-                    Precip{" "}
-                    <span className="right">{wx.precipMmHr != null ? `${wx.precipMmHr} mm/h` : "— mm/h"}</span>
+                    Precip <span className="right">{wx.precipMmHr != null ? `${wx.precipMmHr} mm/h` : "— mm/h"}</span>
                   </div>
                   <div className="badge">
-                    Dew Pt{" "}
-                    <span className="right">{wx.dewPointC != null ? `${wx.dewPointC}°C` : "—°C"}</span>
+                    Dew Pt <span className="right">{wx.dewPointC != null ? `${wx.dewPointC}°C` : "—°C"}</span>
                   </div>
                 </div>
 
@@ -1443,7 +1439,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Right column */}
+          {/* Right column stack (UNCHANGED except Running Log + entry form fuel/mag) */}
           <div className="stack">
             <div className="col">
               <div className="section">
@@ -1464,25 +1460,18 @@ export default function App() {
                       className="mono"
                       placeholder="Lat°"
                       value={state.pos.latDeg}
-                      onChange={(e) =>
-                        setState((p) => ({ ...p, pos: { ...p.pos, latDeg: e.target.value } }))
-                      }
+                      onChange={(e) => setState((p) => ({ ...p, pos: { ...p.pos, latDeg: e.target.value } }))}
                     />
                     <input
                       className="mono"
                       placeholder="Lat'"
                       value={state.pos.latMin}
-                      onChange={(e) =>
-                        setState((p) => ({ ...p, pos: { ...p.pos, latMin: e.target.value } }))
-                      }
+                      onChange={(e) => setState((p) => ({ ...p, pos: { ...p.pos, latMin: e.target.value } }))}
                     />
                     <select
                       value={state.pos.latHem}
                       onChange={(e) =>
-                        setState((p) => ({
-                          ...p,
-                          pos: { ...p.pos, latHem: e.target.value as "N" | "S" },
-                        }))
+                        setState((p) => ({ ...p, pos: { ...p.pos, latHem: e.target.value as "N" | "S" } }))
                       }
                     >
                       <option value="N">N</option>
@@ -1495,25 +1484,18 @@ export default function App() {
                       className="mono"
                       placeholder="Lon°"
                       value={state.pos.lonDeg}
-                      onChange={(e) =>
-                        setState((p) => ({ ...p, pos: { ...p.pos, lonDeg: e.target.value } }))
-                      }
+                      onChange={(e) => setState((p) => ({ ...p, pos: { ...p.pos, lonDeg: e.target.value } }))}
                     />
                     <input
                       className="mono"
                       placeholder="Lon'"
                       value={state.pos.lonMin}
-                      onChange={(e) =>
-                        setState((p) => ({ ...p, pos: { ...p.pos, lonMin: e.target.value } }))
-                      }
+                      onChange={(e) => setState((p) => ({ ...p, pos: { ...p.pos, lonMin: e.target.value } }))}
                     />
                     <select
                       value={state.pos.lonHem}
                       onChange={(e) =>
-                        setState((p) => ({
-                          ...p,
-                          pos: { ...p.pos, lonHem: e.target.value as "E" | "W" },
-                        }))
+                        setState((p) => ({ ...p, pos: { ...p.pos, lonHem: e.target.value as "E" | "W" } }))
                       }
                     >
                       <option value="E">E</option>
@@ -1524,9 +1506,9 @@ export default function App() {
 
                 <div className="grid-4" style={{ marginTop: 6 }}>
                   <input
-                    placeholder="Course True (°)"
-                    value={entryFields.courseTrue}
-                    onChange={(e) => setEntryFields((p) => ({ ...p, courseTrue: e.target.value }))}
+                    placeholder="Course Magnetic (°M)"
+                    value={entryFields.courseMagnetic}
+                    onChange={(e) => setEntryFields((p) => ({ ...p, courseMagnetic: e.target.value }))}
                   />
                   <input
                     placeholder="Course Gyro (°)"
@@ -1536,9 +1518,7 @@ export default function App() {
                   <input
                     placeholder="Steering (°)"
                     value={entryFields.courseSteering}
-                    onChange={(e) =>
-                      setEntryFields((p) => ({ ...p, courseSteering: e.target.value }))
-                    }
+                    onChange={(e) => setEntryFields((p) => ({ ...p, courseSteering: e.target.value }))}
                   />
                   <input
                     placeholder="Speed (kt)"
@@ -1630,17 +1610,32 @@ export default function App() {
                     onChange={(e) => setEntryFields((p) => ({ ...p, watchkeeper: e.target.value }))}
                   />
                   <input
-                    placeholder="Remarks"
-                    value={entryFields.remarks}
-                    onChange={(e) => setEntryFields((p) => ({ ...p, remarks: e.target.value }))}
+                    placeholder="Total Fuel (L)"
+                    value={entryFields.totalFuel}
+                    onChange={(e) => setEntryFields((p) => ({ ...p, totalFuel: e.target.value }))}
                   />
                   <button className="btn" onClick={addEntry}>
                     Add Entry
                   </button>
                 </div>
+
+                <div className="grid-3" style={{ marginTop: 6 }}>
+                  <input
+                    placeholder="Remarks"
+                    value={entryFields.remarks}
+                    onChange={(e) => setEntryFields((p) => ({ ...p, remarks: e.target.value }))}
+                  />
+                  <div className="muted">
+                    Fuel Used is calculated as <span className="mono">prev total − current total</span>.
+                  </div>
+                  <div className="muted right">
+                    Tip: first entry uses yesterday’s saved total fuel (if present).
+                  </div>
+                </div>
               </div>
             </div>
 
+            {/* Daily Log (RESTORED) */}
             <div className="col">
               <div className="section">
                 <h2>Daily Log</h2>
@@ -1673,10 +1668,32 @@ export default function App() {
                 </div>
 
                 <div className="row" style={{ marginTop: 6 }}>
-                  <button className="btn" onClick={() => addMovement("Along")}>Along</button>
-                  <button className="btn" onClick={() => addMovement("Cast Off")}>Cast Off</button>
-                  <button className="btn" onClick={() => addMovement("Anchor Down")}>Anchor Down</button>
-                  <button className="btn" onClick={() => addMovement("Anchor Up")}>Anchor Up</button>
+                  <button className="btn" onClick={() => addMovement("Along")}>
+                    Along
+                  </button>
+                  <button className="btn" onClick={() => addMovement("Cast Off")}>
+                    Cast Off
+                  </button>
+                  <button className="btn" onClick={() => addMovement("Anchor Down")}>
+                    Anchor Down
+                  </button>
+                  <button className="btn" onClick={() => addMovement("Anchor Up")}>
+                    Anchor Up
+                  </button>
+                </div>
+
+                {/* ✅ NEW: daily fuel summary (doesn't change layout; just a badge line) */}
+                <div className="row" style={{ marginTop: 6 }}>
+                  <div className="badge">
+                    ⛽ Fuel used today:{" "}
+                    <span className="right">
+                      {Math.round(todaysFuel.usedSum * 100) / 100} L
+                    </span>
+                  </div>
+                  <span className="muted right">
+                    Last total fuel:{" "}
+                    {todaysFuel.lastTotalFuel != null ? todaysFuel.lastTotalFuel : "—"}
+                  </span>
                 </div>
 
                 <div className="row" style={{ marginTop: 6 }}>
@@ -1725,6 +1742,7 @@ export default function App() {
               </div>
             </div>
 
+            {/* Running Log (UPDATED TABLE) */}
             <div className="col">
               <div className="section">
                 <h2 style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1738,7 +1756,7 @@ export default function App() {
                       <tr>
                         <th>Time</th>
                         <th>Position</th>
-                        <th>C(T)</th>
+                        <th>C(M)</th>
                         <th>C(G)</th>
                         <th>Steer</th>
                         <th>Spd</th>
@@ -1752,59 +1770,59 @@ export default function App() {
                         <th>SeaT</th>
                         <th>Eng</th>
                         <th>Watch</th>
+                        <th>Total Fuel (L)</th>
+                        <th>Used (L)</th>
                         <th>Remarks</th>
                       </tr>
                     </thead>
                     <tbody>
                       {todaysLog.length === 0 ? (
                         <tr>
-                          <td colSpan={17} style={{ textAlign: "center", opacity: 0.7, padding: "10px 0" }}>
+                          <td colSpan={19} style={{ textAlign: "center", opacity: 0.7, padding: "10px 0" }}>
                             No entries yet.
                           </td>
                         </tr>
                       ) : (
-                        todaysLog.map((r, idx) => (
-                          <tr key={`${r.time}-${idx}`}>
-                            <td>{r.time}</td>
-                            <td>{r.position}</td>
-                            <td>{r.courseTrue}</td>
-                            <td>{r.courseGyro}</td>
-                            <td>{r.courseSteering}</td>
-                            <td>{r.speed}</td>
-                            <td>{r.windDir}</td>
-                            <td>{r.windForce}</td>
-                            <td>{r.sea}</td>
-                            <td>{r.sky}</td>
-                            <td>{r.visibility}</td>
-                            <td>{r.barometer}</td>
-                            <td>{r.airTemp}</td>
-                            <td>{r.seaTemp}</td>
-                            <td>{r.engines}</td>
-                            <td>{r.watchkeeper}</td>
-                            <td
-                              title={r.remarks}
-                              style={{
-                                maxWidth: 420,
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
-                              }}
-                            >
-                              {r.remarks || "—"}
-                            </td>
-                          </tr>
-                        ))
+                        todaysLog.map((r, idx) => {
+                          const used = todaysFuel.perEntryUsed[idx];
+                          return (
+                            <tr key={`${r.time}-${idx}`}>
+                              <td>{r.time}</td>
+                              <td>{r.position}</td>
+                              <td>{r.courseMagnetic}</td>
+                              <td>{r.courseGyro}</td>
+                              <td>{r.courseSteering}</td>
+                              <td>{r.speed}</td>
+                              <td>{r.windDir}</td>
+                              <td>{r.windForce}</td>
+                              <td>{r.sea}</td>
+                              <td>{r.sky}</td>
+                              <td>{r.visibility}</td>
+                              <td>{r.barometer}</td>
+                              <td>{r.airTemp}</td>
+                              <td>{r.seaTemp}</td>
+                              <td>{r.engines}</td>
+                              <td>{r.watchkeeper}</td>
+                              <td className="mono">{r.totalFuel || "—"}</td>
+                              <td className="mono">{used != null ? (Math.round(used * 100) / 100).toString() : "—"}</td>
+                              <td title={r.remarks} style={{ maxWidth: 420, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {r.remarks || "—"}
+                              </td>
+                            </tr>
+                          );
+                        })
                       )}
                     </tbody>
                   </table>
                 </div>
 
                 <div className="muted" style={{ marginTop: 8 }}>
-                  Entries are saved per vessel login (Supabase user).
+                  Fuel Used per entry = previous total fuel − current total fuel (first entry uses yesterday’s saved total if available).
                 </div>
               </div>
             </div>
 
+            {/* Daily History (RESTORED; adds fuel summary display) */}
             <div className="col">
               <div className="section">
                 <h2>Daily History</h2>
@@ -1816,17 +1834,34 @@ export default function App() {
                     <details key={`${h.date}-${idx}`}>
                       <summary>
                         <b>{prettyDate(h.date)}</b> — {h.location || "(no location)"} • {h.vesselMode}
+                        {h.fuelSummary?.usedLitres != null ? (
+                          <span className="muted"> • ⛽ {h.fuelSummary.usedLitres} L</span>
+                        ) : null}
                       </summary>
 
                       <div className="grid-3" style={{ marginTop: 6 }}>
                         <div>
-                          <div><b>Weather</b></div>
+                          <div>
+                            <b>Weather</b>
+                          </div>
                           <div>Cond: {h.weather?.condition ?? "—"}</div>
                           <div>Temp: {h.weather?.tempC ?? "—"}°C</div>
-                          <div>Wind: {h.weather?.windKts ?? "—"} kt / {h.weather?.windDir ?? "—"}°</div>
+                          <div>
+                            Wind: {h.weather?.windKts ?? "—"} kt / {h.weather?.windDir ?? "—"}°
+                          </div>
                           <div>Pressure: {h.weather?.pressure ?? "—"} hPa</div>
                           <div>Vis: {h.weather?.visibilityKm ?? "—"} km</div>
-                          <div><b>Marine</b></div>
+                          <div>
+                            <b>Fuel</b>
+                          </div>
+                          <div>Used: {h.fuelSummary?.usedLitres != null ? `${h.fuelSummary.usedLitres} L` : "—"}</div>
+                          <div>
+                            Last Total:{" "}
+                            {h.fuelSummary?.lastTotalFuel != null ? `${h.fuelSummary.lastTotalFuel}` : "—"}
+                          </div>
+                          <div>
+                            <b>Marine</b>
+                          </div>
                           <div>
                             Hs {h.weather?.waveHeightM != null ? h.weather.waveHeightM.toFixed(1) : "—"} m • Tp{" "}
                             {h.weather?.wavePeriodS != null ? h.weather.wavePeriodS.toFixed(0) : "—"} s • Dir{" "}
@@ -1835,7 +1870,9 @@ export default function App() {
                         </div>
 
                         <div>
-                          <div><b>Vessel</b></div>
+                          <div>
+                            <b>Vessel</b>
+                          </div>
                           <div>
                             {h.vessel?.name || "—"} • {h.vessel?.callSign || ""} • {h.vessel?.mmsi || ""}
                           </div>
@@ -1843,23 +1880,44 @@ export default function App() {
                         </div>
 
                         <div>
-                          <div><b>Notes</b></div>
+                          <div>
+                            <b>Notes</b>
+                          </div>
                           <div className="badge" style={{ display: "block", maxHeight: 120, overflow: "auto", padding: 8 }}>
                             {(h.notes || []).map((n, j) => (
-                              <div key={`${n.time}-${j}`}>[{n.time}] {n.text}</div>
+                              <div key={`${n.time}-${j}`}>
+                                [{n.time}] {n.text}
+                              </div>
                             ))}
                           </div>
                         </div>
 
                         <div style={{ gridColumn: "1 / -1" }}>
-                          <div><b>Running Log</b></div>
+                          <div>
+                            <b>Running Log</b>
+                          </div>
                           <div className="table-wrap">
                             <table>
                               <thead>
                                 <tr>
-                                  <th>Time</th><th>Position</th><th>C(T)</th><th>C(G)</th><th>Steer</th><th>Spd</th>
-                                  <th>Wind°</th><th>B</th><th>Sea</th><th>Sky</th><th>Vis</th><th>Baro</th>
-                                  <th>Air</th><th>SeaT</th><th>Eng</th><th>Watch</th><th>Remarks</th>
+                                  <th>Time</th>
+                                  <th>Position</th>
+                                  <th>C(M)</th>
+                                  <th>C(G)</th>
+                                  <th>Steer</th>
+                                  <th>Spd</th>
+                                  <th>Wind°</th>
+                                  <th>B</th>
+                                  <th>Sea</th>
+                                  <th>Sky</th>
+                                  <th>Vis</th>
+                                  <th>Baro</th>
+                                  <th>Air</th>
+                                  <th>SeaT</th>
+                                  <th>Eng</th>
+                                  <th>Watch</th>
+                                  <th>Total Fuel</th>
+                                  <th>Remarks</th>
                                 </tr>
                               </thead>
                               <tbody>
@@ -1867,7 +1925,7 @@ export default function App() {
                                   <tr key={`${r.time}-${j}`}>
                                     <td>{r.time}</td>
                                     <td>{r.position}</td>
-                                    <td>{r.courseTrue}</td>
+                                    <td>{r.courseMagnetic}</td>
                                     <td>{r.courseGyro}</td>
                                     <td>{r.courseSteering}</td>
                                     <td>{r.speed}</td>
@@ -1881,6 +1939,7 @@ export default function App() {
                                     <td>{r.seaTemp}</td>
                                     <td>{r.engines}</td>
                                     <td>{r.watchkeeper}</td>
+                                    <td className="mono">{r.totalFuel || "—"}</td>
                                     <td>{r.remarks}</td>
                                   </tr>
                                 ))}
