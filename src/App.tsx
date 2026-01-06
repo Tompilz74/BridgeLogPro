@@ -342,7 +342,7 @@ function normalizeBackupToState(obj: unknown): AppState | null {
         engines: String(r.engines ?? ""),
         watchkeeper: String(r.watchkeeper ?? watchkeeper ?? ""),
         remarks: String(r.remarks ?? ""),
-        totalFuel: String(r.totalFuel ?? ""), // ✅ new
+        totalFuel: String(r.totalFuel ?? ""),
       };
     });
 
@@ -522,6 +522,9 @@ function GlobalStyles() {
       #toast{position:fixed;left:12px;right:12px;bottom:12px;background:#7f1d1d;color:#fff;padding:10px;font-family:ui-monospace,monospace;display:none;z-index:999999;border-radius:10px}
       details{border:1px solid var(--card-border);border-radius:10px;margin:8px 0;padding:6px;background:transparent}
       summary{cursor:pointer}
+      .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:999999;display:flex;align-items:center;justify-content:center;padding:16px}
+      .modal{background:var(--card);border:1px solid var(--card-border);border-radius:14px;max-width:720px;width:100%;padding:14px}
+      .danger{background:#7f1d1d !important;border-color:#5f1414 !important}
     `}</style>
   );
 }
@@ -591,6 +594,45 @@ function computeFuelForDay(dayEntries: RunningEntry[], prevTotalFuel: number | n
     usedSum,
     lastTotalFuel: prev != null ? prev : prevTotalFuel,
   };
+}
+
+/* =========================================================
+   Helpers: entry identity + history fuel recompute
+========================================================= */
+function entryKey(e: Pick<RunningEntry, "date" | "time" | "position">) {
+  return `${e.date}__${e.time}__${e.position}`;
+}
+
+function recomputeHistoryFuelSummaries(history: HistoryDay[]): HistoryDay[] {
+  // We recompute in chronological order so fuel carries forward correctly.
+  const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date)); // oldest -> newest
+  const byDate = new Map<string, HistoryDay>();
+
+  // seed map with shallow copies
+  for (const h of sorted) byDate.set(h.date, { ...h });
+
+  for (const h of sorted) {
+    const yISO = getYesterdayISO(h.date);
+    const y = byDate.get(yISO);
+
+    const prevFuel =
+      y?.fuelSummary?.lastTotalFuel ??
+      lastTotalFuelFromEntries(y?.runningLog ?? []) ??
+      null;
+
+    const fuel = computeFuelForDay(h.runningLog ?? [], prevFuel);
+
+    byDate.set(h.date, {
+      ...h,
+      fuelSummary: {
+        usedLitres: Math.round(fuel.usedSum * 100) / 100,
+        lastTotalFuel: fuel.lastTotalFuel ?? null,
+      },
+    });
+  }
+
+  // return in original order (your UI uses existing order)
+  return history.map((h) => byDate.get(h.date) ?? h);
 }
 
 /* =========================================================
@@ -941,7 +983,7 @@ export default function App() {
     engines: "",
     watchkeeper: "",
     remarks: "",
-    totalFuel: "", // ✅ NEW
+    totalFuel: "",
   });
 
   function addEntry() {
@@ -981,7 +1023,7 @@ export default function App() {
           engines: entryFields.engines,
           watchkeeper: entryFields.watchkeeper || prev.watchkeeper || "",
           remarks: entryFields.remarks,
-          totalFuel: entryFields.totalFuel, // ✅ NEW
+          totalFuel: entryFields.totalFuel,
         },
         ...prev.log,
       ],
@@ -1015,7 +1057,7 @@ export default function App() {
           engines: "",
           watchkeeper: prev.watchkeeper || "",
           remarks: text,
-          totalFuel: "", // ✅ allow blank
+          totalFuel: "",
         },
         ...prev.log,
       ];
@@ -1140,6 +1182,83 @@ export default function App() {
   }
 
   /* =========================================================
+     NEW: Edit/Delete Running Log Entries
+========================================================= */
+  type EditScope = "today" | "history";
+  type EditCtx = { scope: EditScope; dayISO: string; key: string };
+
+  const [editOpen, setEditOpen] = useState(false);
+  const [editCtx, setEditCtx] = useState<EditCtx | null>(null);
+  const [editDraft, setEditDraft] = useState<RunningEntry | null>(null);
+
+  function openEdit(scope: EditScope, dayISO: string, entry: RunningEntry) {
+    setEditCtx({ scope, dayISO, key: entryKey(entry) });
+    setEditDraft({ ...entry });
+    setEditOpen(true);
+  }
+
+  function closeEdit() {
+    setEditOpen(false);
+    setEditCtx(null);
+    setEditDraft(null);
+  }
+
+  function applyEditedEntry(prev: AppState, ctx: EditCtx, draft: RunningEntry): AppState {
+    if (ctx.scope === "today") {
+      const nextLog = prev.log.map((e) => (entryKey(e) === ctx.key ? { ...draft } : e));
+      return { ...prev, log: nextLog };
+    }
+
+    // history edit
+    const nextHistory = prev.history.map((h) => {
+      if (h.date !== ctx.dayISO) return h;
+      const nextRunningLog = (h.runningLog ?? []).map((e) => (entryKey(e) === ctx.key ? { ...draft } : e));
+      return { ...h, runningLog: nextRunningLog };
+    });
+
+    return { ...prev, history: recomputeHistoryFuelSummaries(nextHistory) };
+  }
+
+  function applyDeletedEntry(prev: AppState, ctx: EditCtx): AppState {
+    if (ctx.scope === "today") {
+      const nextLog = prev.log.filter((e) => entryKey(e) !== ctx.key);
+      return { ...prev, log: nextLog };
+    }
+
+    const nextHistory = prev.history.map((h) => {
+      if (h.date !== ctx.dayISO) return h;
+      const nextRunningLog = (h.runningLog ?? []).filter((e) => entryKey(e) !== ctx.key);
+      return { ...h, runningLog: nextRunningLog };
+    });
+
+    return { ...prev, history: recomputeHistoryFuelSummaries(nextHistory) };
+  }
+
+  function saveEditEntry() {
+    if (!editCtx || !editDraft) return;
+
+    // Light validation: totalFuel can be blank, but if present it should parse as number.
+    const tf = editDraft.totalFuel?.trim() ?? "";
+    if (tf && parseNumberLoose(tf) == null) {
+      showToast("Total Fuel must be a number (or blank)");
+      return;
+    }
+
+    setState((prev) => applyEditedEntry(prev, editCtx, editDraft));
+    closeEdit();
+    showToast("Entry updated", true);
+  }
+
+  function deleteEntry(scope: EditScope, dayISO: string, entry: RunningEntry) {
+    const ok = confirm("Delete this log entry? This cannot be undone.");
+    if (!ok) return;
+
+    const ctx: EditCtx = { scope, dayISO, key: entryKey(entry) };
+    setState((prev) => applyDeletedEntry(prev, ctx));
+    showToast("Entry deleted", true);
+  }
+
+  /* =========================================================
      Render: Login gate (unchanged)
 ========================================================= */
   if (!sessionReady) {
@@ -1186,7 +1305,12 @@ export default function App() {
                   onChange={(e) => setLoginEmail(e.target.value)}
                   placeholder="Vessel email (Supabase Auth user)"
                 />
-                <input value={loginPass} onChange={(e) => setLoginPass(e.target.value)} type="password" placeholder="Password" />
+                <input
+                  value={loginPass}
+                  onChange={(e) => setLoginPass(e.target.value)}
+                  type="password"
+                  placeholder="Password"
+                />
                 <button className="btn" onClick={() => void doLogin()}>
                   Login
                 </button>
@@ -1259,7 +1383,7 @@ export default function App() {
         </header>
 
         <div className="grid grid-2">
-          {/* Left column stack (UNCHANGED except fuel badge in Daily Log) */}
+          {/* Left column stack */}
           <div className="stack">
             <div className="col">
               <div className="section">
@@ -1375,7 +1499,10 @@ export default function App() {
                     Pressure <span className="right">{wx.pressure != null ? `${wx.pressure} hPa` : "— hPa"}</span>
                   </div>
                   <div className="badge">
-                    Vis <span className="right">{wx.visibilityKm != null ? `${wx.visibilityKm.toFixed(1)} km` : "— km"}</span>
+                    Vis{" "}
+                    <span className="right">
+                      {wx.visibilityKm != null ? `${wx.visibilityKm.toFixed(1)} km` : "— km"}
+                    </span>
                   </div>
                 </div>
 
@@ -1439,7 +1566,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Right column stack (UNCHANGED except Running Log + entry form fuel/mag) */}
+          {/* Right column stack */}
           <div className="stack">
             <div className="col">
               <div className="section">
@@ -1628,14 +1755,12 @@ export default function App() {
                   <div className="muted">
                     Fuel Used is calculated as <span className="mono">prev total − current total</span>.
                   </div>
-                  <div className="muted right">
-                    Tip: first entry uses yesterday’s saved total fuel (if present).
-                  </div>
+                  <div className="muted right">Tip: first entry uses yesterday’s saved total fuel (if present).</div>
                 </div>
               </div>
             </div>
 
-            {/* Daily Log (RESTORED) */}
+            {/* Daily Log */}
             <div className="col">
               <div className="section">
                 <h2>Daily Log</h2>
@@ -1682,17 +1807,12 @@ export default function App() {
                   </button>
                 </div>
 
-                {/* ✅ NEW: daily fuel summary (doesn't change layout; just a badge line) */}
                 <div className="row" style={{ marginTop: 6 }}>
                   <div className="badge">
-                    ⛽ Fuel used today:{" "}
-                    <span className="right">
-                      {Math.round(todaysFuel.usedSum * 100) / 100} L
-                    </span>
+                    ⛽ Fuel used today: <span className="right">{Math.round(todaysFuel.usedSum * 100) / 100} L</span>
                   </div>
                   <span className="muted right">
-                    Last total fuel:{" "}
-                    {todaysFuel.lastTotalFuel != null ? todaysFuel.lastTotalFuel : "—"}
+                    Last total fuel: {todaysFuel.lastTotalFuel != null ? todaysFuel.lastTotalFuel : "—"}
                   </span>
                 </div>
 
@@ -1742,7 +1862,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Running Log (UPDATED TABLE) */}
+            {/* Running Log (UPDATED TABLE with Actions) */}
             <div className="col">
               <div className="section">
                 <h2 style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1773,12 +1893,13 @@ export default function App() {
                         <th>Total Fuel (L)</th>
                         <th>Used (L)</th>
                         <th>Remarks</th>
+                        <th>Actions</th>
                       </tr>
                     </thead>
                     <tbody>
                       {todaysLog.length === 0 ? (
                         <tr>
-                          <td colSpan={19} style={{ textAlign: "center", opacity: 0.7, padding: "10px 0" }}>
+                          <td colSpan={20} style={{ textAlign: "center", opacity: 0.7, padding: "10px 0" }}>
                             No entries yet.
                           </td>
                         </tr>
@@ -1805,8 +1926,24 @@ export default function App() {
                               <td>{r.watchkeeper}</td>
                               <td className="mono">{r.totalFuel || "—"}</td>
                               <td className="mono">{used != null ? (Math.round(used * 100) / 100).toString() : "—"}</td>
-                              <td title={r.remarks} style={{ maxWidth: 420, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              <td
+                                title={r.remarks}
+                                style={{
+                                  maxWidth: 420,
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
                                 {r.remarks || "—"}
+                              </td>
+                              <td style={{ whiteSpace: "nowrap" }}>
+                                <button className="btn" onClick={() => openEdit("today", state.daily.date, r)}>
+                                  Edit
+                                </button>{" "}
+                                <button className="btn danger" onClick={() => deleteEntry("today", state.daily.date, r)}>
+                                  Delete
+                                </button>
                               </td>
                             </tr>
                           );
@@ -1822,7 +1959,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Daily History (RESTORED; adds fuel summary display) */}
+            {/* Daily History (UPDATED table actions) */}
             <div className="col">
               <div className="section">
                 <h2>Daily History</h2>
@@ -1856,8 +1993,7 @@ export default function App() {
                           </div>
                           <div>Used: {h.fuelSummary?.usedLitres != null ? `${h.fuelSummary.usedLitres} L` : "—"}</div>
                           <div>
-                            Last Total:{" "}
-                            {h.fuelSummary?.lastTotalFuel != null ? `${h.fuelSummary.lastTotalFuel}` : "—"}
+                            Last Total: {h.fuelSummary?.lastTotalFuel != null ? `${h.fuelSummary.lastTotalFuel}` : "—"}
                           </div>
                           <div>
                             <b>Marine</b>
@@ -1918,6 +2054,7 @@ export default function App() {
                                   <th>Watch</th>
                                   <th>Total Fuel</th>
                                   <th>Remarks</th>
+                                  <th>Actions</th>
                                 </tr>
                               </thead>
                               <tbody>
@@ -1941,10 +2078,22 @@ export default function App() {
                                     <td>{r.watchkeeper}</td>
                                     <td className="mono">{r.totalFuel || "—"}</td>
                                     <td>{r.remarks}</td>
+                                    <td style={{ whiteSpace: "nowrap" }}>
+                                      <button className="btn" onClick={() => openEdit("history", h.date, r)}>
+                                        Edit
+                                      </button>{" "}
+                                      <button className="btn danger" onClick={() => deleteEntry("history", h.date, r)}>
+                                        Delete
+                                      </button>
+                                    </td>
                                   </tr>
                                 ))}
                               </tbody>
                             </table>
+                          </div>
+
+                          <div className="muted" style={{ marginTop: 6 }}>
+                            Editing history re-computes fuel summaries forward in time.
                           </div>
                         </div>
                       </div>
@@ -1955,6 +2104,128 @@ export default function App() {
             </div>
           </div>
         </div>
+
+        {/* ===== Edit Modal ===== */}
+        {editOpen && editDraft && editCtx && (
+          <div className="modal-backdrop" onClick={closeEdit}>
+            <div className="modal" onClick={(e) => e.stopPropagation()}>
+              <h2 style={{ marginTop: 0 }}>
+                Edit Log Entry <span className="muted">({editCtx.scope === "today" ? "Today" : "History"} • {prettyDate(editCtx.dayISO)})</span>
+              </h2>
+
+              <div className="grid-3">
+                <input className="mono" readOnly value={editDraft.date} />
+                <input className="mono" readOnly value={editDraft.time} />
+                <input className="mono" readOnly value={editDraft.position} />
+              </div>
+
+              <div className="grid-4" style={{ marginTop: 8 }}>
+                <input
+                  placeholder="Course Magnetic (°M)"
+                  value={editDraft.courseMagnetic}
+                  onChange={(e) => setEditDraft((p) => (p ? { ...p, courseMagnetic: e.target.value } : p))}
+                />
+                <input
+                  placeholder="Course Gyro (°)"
+                  value={editDraft.courseGyro}
+                  onChange={(e) => setEditDraft((p) => (p ? { ...p, courseGyro: e.target.value } : p))}
+                />
+                <input
+                  placeholder="Steering (°)"
+                  value={editDraft.courseSteering}
+                  onChange={(e) => setEditDraft((p) => (p ? { ...p, courseSteering: e.target.value } : p))}
+                />
+                <input
+                  placeholder="Speed (kt)"
+                  value={editDraft.speed}
+                  onChange={(e) => setEditDraft((p) => (p ? { ...p, speed: e.target.value } : p))}
+                />
+              </div>
+
+              <div className="grid-4" style={{ marginTop: 8 }}>
+                <input
+                  placeholder="Wind Dir (°true)"
+                  value={editDraft.windDir}
+                  onChange={(e) => setEditDraft((p) => (p ? { ...p, windDir: e.target.value } : p))}
+                />
+                <input
+                  placeholder="Beaufort (B#)"
+                  value={editDraft.windForce}
+                  onChange={(e) => setEditDraft((p) => (p ? { ...p, windForce: e.target.value } : p))}
+                />
+                <input
+                  placeholder="Sea"
+                  value={editDraft.sea}
+                  onChange={(e) => setEditDraft((p) => (p ? { ...p, sea: e.target.value } : p))}
+                />
+                <input
+                  placeholder="Sky"
+                  value={editDraft.sky}
+                  onChange={(e) => setEditDraft((p) => (p ? { ...p, sky: e.target.value } : p))}
+                />
+              </div>
+
+              <div className="grid-4" style={{ marginTop: 8 }}>
+                <input
+                  placeholder="Visibility"
+                  value={editDraft.visibility}
+                  onChange={(e) => setEditDraft((p) => (p ? { ...p, visibility: e.target.value } : p))}
+                />
+                <input
+                  placeholder="Barometer (hPa)"
+                  value={editDraft.barometer}
+                  onChange={(e) => setEditDraft((p) => (p ? { ...p, barometer: e.target.value } : p))}
+                />
+                <input
+                  placeholder="Air Temp (°C)"
+                  value={editDraft.airTemp}
+                  onChange={(e) => setEditDraft((p) => (p ? { ...p, airTemp: e.target.value } : p))}
+                />
+                <input
+                  placeholder="Sea Temp (°C)"
+                  value={editDraft.seaTemp}
+                  onChange={(e) => setEditDraft((p) => (p ? { ...p, seaTemp: e.target.value } : p))}
+                />
+              </div>
+
+              <div className="grid-4" style={{ marginTop: 8 }}>
+                <input
+                  placeholder="Engines"
+                  value={editDraft.engines}
+                  onChange={(e) => setEditDraft((p) => (p ? { ...p, engines: e.target.value } : p))}
+                />
+                <input
+                  placeholder="Watchkeeper"
+                  value={editDraft.watchkeeper}
+                  onChange={(e) => setEditDraft((p) => (p ? { ...p, watchkeeper: e.target.value } : p))}
+                />
+                <input
+                  placeholder="Total Fuel (L)"
+                  value={editDraft.totalFuel}
+                  onChange={(e) => setEditDraft((p) => (p ? { ...p, totalFuel: e.target.value } : p))}
+                />
+                <input
+                  placeholder="Remarks"
+                  value={editDraft.remarks}
+                  onChange={(e) => setEditDraft((p) => (p ? { ...p, remarks: e.target.value } : p))}
+                />
+              </div>
+
+              <div className="row" style={{ marginTop: 10, justifyContent: "flex-end" }}>
+                <button className="btn" onClick={closeEdit}>
+                  Cancel
+                </button>
+                <button className="btn" onClick={saveEditEntry}>
+                  Save
+                </button>
+              </div>
+
+              <div className="muted" style={{ marginTop: 8 }}>
+                Tip: fixing <span className="mono">Total Fuel (L)</span> will immediately correct “Used (L)” and daily totals.
+              </div>
+            </div>
+          </div>
+        )}
 
         <footer className="muted" style={{ marginTop: 10 }}>
           © {new Date().getFullYear()} Obsidian Marine — BridgeLog Pro.
