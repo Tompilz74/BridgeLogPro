@@ -31,9 +31,11 @@ type VesselDetails = {
 type PosState = {
   latDeg: string;
   latMin: string;
+  latMinDec: string; // NEW: decimal minutes (0–999)
   latHem: "N" | "S";
   lonDeg: string;
   lonMin: string;
+  lonMinDec: string; // NEW: decimal minutes (0–999)
   lonHem: "E" | "W";
 };
 
@@ -414,12 +416,15 @@ function normalizeBackupToState(obj: unknown): AppState | null {
     log: normalizedLog,
     history: normalizedHistory,
     pos: {
-      latDeg: String((pos as PosState).latDeg ?? ""),
-      latMin: String((pos as PosState).latMin ?? ""),
-      latHem: ((pos as PosState).latHem ?? "S") as "N" | "S",
-      lonDeg: String((pos as PosState).lonDeg ?? ""),
-      lonMin: String((pos as PosState).lonMin ?? ""),
-      lonHem: ((pos as PosState).lonHem ?? "E") as "E" | "W",
+      // ✅ backward compatible for old backups: latMinDec/lonMinDec may not exist
+      latDeg: String((pos as any).latDeg ?? ""),
+      latMin: String((pos as any).latMin ?? ""),
+      latMinDec: String((pos as any).latMinDec ?? ""),
+      latHem: ((pos as any).latHem ?? "S") as "N" | "S",
+      lonDeg: String((pos as any).lonDeg ?? ""),
+      lonMin: String((pos as any).lonMin ?? ""),
+      lonMinDec: String((pos as any).lonMinDec ?? ""),
+      lonHem: ((pos as any).lonHem ?? "E") as "E" | "W",
     },
     daily: {
       date: String((daily as DailyState).date ?? todayISO()),
@@ -448,9 +453,11 @@ function defaultState(): AppState {
     pos: {
       latDeg: "",
       latMin: "",
+      latMinDec: "",
       latHem: "S",
       lonDeg: "",
       lonMin: "",
+      lonMinDec: "",
       lonHem: "E",
     },
     daily: { date: todayISO(), location: "", mode: "Along" },
@@ -483,7 +490,7 @@ async function upsertStateToSupabase(userId: string, state: AppState): Promise<v
 }
 
 /* =========================================================
-   Styles (unchanged)
+   Styles (UPDATED: position inputs stay on one line)
 ========================================================= */
 function GlobalStyles() {
   return (
@@ -525,6 +532,11 @@ function GlobalStyles() {
       .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:999999;display:flex;align-items:center;justify-content:center;padding:16px}
       .modal{background:var(--card);border:1px solid var(--card-border);border-radius:14px;max-width:720px;width:100%;padding:14px}
       .danger{background:#7f1d1d !important;border-color:#5f1414 !important}
+
+      /* ✅ Keep Lat/Lon inputs on ONE line (deg / min / .mmm / hem) */
+      .pos-row{display:grid;grid-template-columns:1fr 1fr 1fr 72px;gap:8px;align-items:center}
+      .pos-row input,.pos-row select{width:100%}
+      @media(max-width:420px){.pos-row{grid-template-columns:1fr 1fr 1fr 64px}}
     `}</style>
   );
 }
@@ -852,8 +864,7 @@ export default function App() {
         weatherCode: typeof c.weather_code === "number" ? c.weather_code : null,
         condition: typeof c.weather_code === "number" ? WMO[c.weather_code as number] : null,
         precipMmHr: typeof c.precipitation === "number" ? c.precipitation : null,
-        humidityPct:
-          typeof c.relative_humidity_2m === "number" ? (c.relative_humidity_2m as number) : null,
+        humidityPct: typeof c.relative_humidity_2m === "number" ? (c.relative_humidity_2m as number) : null,
         cloudPct: typeof c.cloud_cover === "number" ? (c.cloud_cover as number) : null,
         dewPointC: typeof c.dew_point_2m === "number" ? (c.dew_point_2m as number) : null,
       };
@@ -905,17 +916,24 @@ export default function App() {
     );
   }
 
+  // ✅ UPDATED: degrees + minutes + decimal minutes
   function fromPosFields() {
     const latDeg = Number(state.pos.latDeg);
     const latMin = Number(state.pos.latMin || 0);
+    const latDec = Number(state.pos.latMinDec || 0);
+
     const lonDeg = Number(state.pos.lonDeg);
     const lonMin = Number(state.pos.lonMin || 0);
+    const lonDec = Number(state.pos.lonMinDec || 0);
 
     const latSign = state.pos.latHem === "S" ? -1 : 1;
     const lonSign = state.pos.lonHem === "W" ? -1 : 1;
 
-    const lat = (latDeg + latMin / 60) * latSign;
-    const lon = (lonDeg + lonMin / 60) * lonSign;
+    const latMinutesTotal = latMin + latDec / 1000;
+    const lonMinutesTotal = lonMin + lonDec / 1000;
+
+    const lat = (latDeg + latMinutesTotal / 60) * latSign;
+    const lon = (lonDeg + lonMinutesTotal / 60) * lonSign;
 
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
       showToast("Enter valid degrees & minutes");
@@ -942,10 +960,15 @@ export default function App() {
   /* -------------------------
      Position helpers
   -------------------------- */
+  // ✅ UPDATED: output as DD°MM.mmm'H
   function composedPos(): string {
-    const { latDeg, latMin, latHem, lonDeg, lonMin, lonHem } = state.pos;
-    const lat = latDeg && latMin && latHem ? `${latDeg}°${latMin}'${latHem}` : "";
-    const lon = lonDeg && lonMin && lonHem ? `${lonDeg}°${lonMin}'${lonHem}` : "";
+    const { latDeg, latMin, latMinDec, latHem, lonDeg, lonMin, lonMinDec, lonHem } = state.pos;
+
+    const latDec = String(latMinDec ?? "").padStart(3, "0");
+    const lonDec = String(lonMinDec ?? "").padStart(3, "0");
+
+    const lat = latDeg && latMin && latHem ? `${latDeg}°${latMin}.${latDec}'${latHem}` : "";
+    const lon = lonDeg && lonMin && lonHem ? `${lonDeg}°${lonMin}.${lonDec}'${lonHem}` : "";
     return lat && lon ? `${lat} / ${lon}` : "";
   }
 
@@ -1582,7 +1605,8 @@ export default function App() {
 
                   <div className="muted">Position</div>
 
-                  <div className="row">
+                  {/* ✅ UPDATED: position rows use grid so they don't stack */}
+                  <div className="pos-row">
                     <input
                       className="mono"
                       placeholder="Lat°"
@@ -1595,6 +1619,17 @@ export default function App() {
                       value={state.pos.latMin}
                       onChange={(e) => setState((p) => ({ ...p, pos: { ...p.pos, latMin: e.target.value } }))}
                     />
+                    <input
+                      className="mono"
+                      placeholder="Lat .mmm"
+                      value={state.pos.latMinDec}
+                      onChange={(e) =>
+                        setState((p) => ({
+                          ...p,
+                          pos: { ...p.pos, latMinDec: e.target.value },
+                        }))
+                      }
+                    />
                     <select
                       value={state.pos.latHem}
                       onChange={(e) =>
@@ -1606,7 +1641,7 @@ export default function App() {
                     </select>
                   </div>
 
-                  <div className="row">
+                  <div className="pos-row">
                     <input
                       className="mono"
                       placeholder="Lon°"
@@ -1618,6 +1653,17 @@ export default function App() {
                       placeholder="Lon'"
                       value={state.pos.lonMin}
                       onChange={(e) => setState((p) => ({ ...p, pos: { ...p.pos, lonMin: e.target.value } }))}
+                    />
+                    <input
+                      className="mono"
+                      placeholder="Lon .mmm"
+                      value={state.pos.lonMinDec}
+                      onChange={(e) =>
+                        setState((p) => ({
+                          ...p,
+                          pos: { ...p.pos, lonMinDec: e.target.value },
+                        }))
+                      }
                     />
                     <select
                       value={state.pos.lonHem}
@@ -2110,7 +2156,10 @@ export default function App() {
           <div className="modal-backdrop" onClick={closeEdit}>
             <div className="modal" onClick={(e) => e.stopPropagation()}>
               <h2 style={{ marginTop: 0 }}>
-                Edit Log Entry <span className="muted">({editCtx.scope === "today" ? "Today" : "History"} • {prettyDate(editCtx.dayISO)})</span>
+                Edit Log Entry{" "}
+                <span className="muted">
+                  ({editCtx.scope === "today" ? "Today" : "History"} • {prettyDate(editCtx.dayISO)})
+                </span>
               </h2>
 
               <div className="grid-3">
