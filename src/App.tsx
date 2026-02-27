@@ -31,11 +31,11 @@ type VesselDetails = {
 type PosState = {
   latDeg: string;
   latMin: string;
-  latMinDec: string; // NEW: decimal minutes (0–999)
+  latMinDec: string; // decimal minutes (0–999)
   latHem: "N" | "S";
   lonDeg: string;
   lonMin: string;
-  lonMinDec: string; // NEW: decimal minutes (0–999)
+  lonMinDec: string; // decimal minutes (0–999)
   lonHem: "E" | "W";
 };
 
@@ -52,14 +52,13 @@ type RunningEntry = {
   time: string;
   position: string;
 
-  // ✅ renamed in UI to magnetic (we keep compatibility in normalize)
   courseMagnetic: string;
   courseGyro: string;
   courseSteering: string;
 
   speed: string;
   windDir: string;
-  windForce: string; // Beaufort number string
+  windForce: string;
   sea: string;
   sky: string;
   visibility: string;
@@ -70,8 +69,7 @@ type RunningEntry = {
   watchkeeper: string;
   remarks: string;
 
-  // ✅ NEW
-  totalFuel: string; // store as string to match the rest of the log fields
+  totalFuel: string;
 };
 
 type WeatherState = {
@@ -99,15 +97,12 @@ type HistoryDay = {
   notes: Note[];
   weather: WeatherState;
   runningLog: RunningEntry[];
-
-  // ✅ NEW: saved daily fuel summary
   fuelSummary?: {
     usedLitres?: number;
     lastTotalFuel?: number | null;
   };
 };
 
-/** The full app state we persist */
 type AppState = {
   vessel: VesselDetails;
   watchkeeper: string;
@@ -317,7 +312,6 @@ function normalizeBackupToState(obj: unknown): AppState | null {
   const normalizedLog: RunningEntry[] = log
     .filter((r) => r && typeof r === "object")
     .map((r: any) => {
-      // ✅ Support older backups that used courseTrue
       const courseMagnetic =
         typeof r.courseMagnetic === "string"
           ? r.courseMagnetic
@@ -416,7 +410,6 @@ function normalizeBackupToState(obj: unknown): AppState | null {
     log: normalizedLog,
     history: normalizedHistory,
     pos: {
-      // ✅ backward compatible for old backups: latMinDec/lonMinDec may not exist
       latDeg: String((pos as any).latDeg ?? ""),
       latMin: String((pos as any).latMin ?? ""),
       latMinDec: String((pos as any).latMinDec ?? ""),
@@ -469,7 +462,7 @@ function defaultState(): AppState {
 }
 
 /* =========================================================
-   Supabase Storage (per vessel login)
+   Supabase Storage
 ========================================================= */
 async function loadStateFromSupabase(userId: string): Promise<AppState | null> {
   const { data, error } = await supabase.from("blp_state").select("state").eq("user_id", userId).maybeSingle();
@@ -490,15 +483,17 @@ async function upsertStateToSupabase(userId: string, state: AppState): Promise<v
 }
 
 /* =========================================================
-   Styles (UPDATED: position inputs stay on one line)
+   Styles (UPDATED: tablet-fit tables + no page side-scroll)
 ========================================================= */
 function GlobalStyles() {
   return (
     <style>{`
       :root { --bg:#f6f7fb; --fg:#0a0a0a; --muted:#60646c; --card:#fff; --card-border:#e7e8ec; --input-bg:#fff; --input-border:#d7d9df; --badge-bg:#f1f3f7; --btn-bg:#111827; --btn-border:#0b1220; --btn-hover:#0d1526; --table-head:#f1f3f7; }
       html[data-theme="dark"] { --bg:#0b0b0b; --fg:#fff; --muted:#bbb; --card:#111; --card-border:#2a2a2a; --input-bg:#0b0b0b; --input-border:#2a2a2a; --badge-bg:#1a1a1a; --btn-bg:#222; --btn-border:#3a3a3a; --btn-hover:#2a2a2a; --table-head:#0f0f0f; }
+
       html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,Noto Sans; height:auto; min-height:100%;}
-      body{overflow:auto;}
+      body{overflow:auto; overflow-x:hidden;} /* ✅ stops page side-scroll */
+
       .container{max-width:1120px;margin:0 auto;padding:16px}
       .grid{display:grid;gap:12px}
       .col{background:var(--card);border:1px solid var(--card-border);border-radius:16px;overflow:hidden}
@@ -512,16 +507,19 @@ function GlobalStyles() {
       .btn{background:var(--btn-bg);color:#fff;border:1px solid var(--btn-border);padding:8px 12px;border-radius:8px;cursor:pointer}
       .btn:hover{background:var(--btn-hover)}
       .muted{color:var(--muted);font-size:12px}
+
       table{width:100%;border-collapse:collapse;font-size:12px;color:var(--fg)}
       th,td{text-align:left;padding:6px 8px;white-space:nowrap;border-color:var(--card-border)}
       thead{background:var(--table-head)}
       tbody tr{border-top:1px solid var(--card-border)}
+
       .pill{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border-radius:999px;border:1px solid var(--card-border);background:var(--badge-bg);font-size:12px;color:var(--fg)}
       .badge{display:inline-flex;align-items:center;gap:6px;padding:2px 6px;border-radius:6px;border:1px solid var(--card-border);background:var(--badge-bg);font-size:11px;color:var(--fg)}
       .grid-2{display:grid;grid-template-columns:1fr;gap:12px}
       .grid-3{display:grid;grid-template-columns:1fr;gap:12px}
       .grid-4{display:grid;grid-template-columns:1fr;gap:12px}
       @media(min-width:900px){.grid-2{grid-template-columns:300px 1fr}.grid-3{grid-template-columns:repeat(3,minmax(0,1fr))}.grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}}
+
       .table-wrap{overflow:auto; max-width:100%}
       .stack{display:flex;flex-direction:column;gap:8px}
       .right{margin-left:auto}
@@ -533,19 +531,23 @@ function GlobalStyles() {
       .modal{background:var(--card);border:1px solid var(--card-border);border-radius:14px;max-width:720px;width:100%;padding:14px}
       .danger{background:#7f1d1d !important;border-color:#5f1414 !important}
 
-      /* ✅ Keep Lat/Lon inputs on ONE line (deg / min / .mmm / hem) */
+      /* Keep Lat/Lon inputs on one line */
       .pos-row{display:grid;grid-template-columns:1fr 1fr 1fr 72px;gap:8px;align-items:center}
       .pos-row input,.pos-row select{width:100%}
       @media(max-width:420px){.pos-row{grid-template-columns:1fr 1fr 1fr 64px}}
+
+      /* ✅ Tablet fit: hide less-important columns so the table doesn't force horizontal page scroll */
+      @media (max-width: 1100px){
+        .tablet-hide{display:none !important;}
+        th,td{padding:6px 6px;font-size:11px;}
+        .remarks-cell{white-space:normal;max-width:260px;}
+      }
     `}</style>
   );
 }
 
 /* =========================================================
    Fuel math (daily)
-   Rule: Fuel Used = prevTotal - currentTotal
-   - First entry uses yesterday’s lastTotalFuel if available.
-   - Negative delta treated as refuel (not added to used).
 ========================================================= */
 function getYesterdayISO(iso: string): string {
   const d = new Date(`${iso}T00:00:00`);
@@ -569,10 +571,7 @@ function computeFuelForDay(dayEntries: RunningEntry[], prevTotalFuel: number | n
   const perEntryUsed: Array<number | null> = [];
   let usedSum = 0;
 
-  // dayEntries are in the order they appear in table (your code stores newest-first)
-  // For fuel math we want chronological.
   const chrono = [...dayEntries].slice().reverse();
-
   const usedMap = new Map<string, number | null>();
 
   for (const e of chrono) {
@@ -585,18 +584,14 @@ function computeFuelForDay(dayEntries: RunningEntry[], prevTotalFuel: number | n
         used = delta;
         usedSum += delta;
       } else {
-        // refuel: ignore for "used"
-        used = null;
+        used = null; // refuel
       }
     }
-
-    // update prev if current valid
     if (cur != null) prev = cur;
 
     usedMap.set(`${e.date}__${e.time}__${e.position}`, used);
   }
 
-  // return in the same order as incoming dayEntries (newest-first)
   for (const e of dayEntries) {
     perEntryUsed.push(usedMap.get(`${e.date}__${e.time}__${e.position}`) ?? null);
   }
@@ -616,11 +611,8 @@ function entryKey(e: Pick<RunningEntry, "date" | "time" | "position">) {
 }
 
 function recomputeHistoryFuelSummaries(history: HistoryDay[]): HistoryDay[] {
-  // We recompute in chronological order so fuel carries forward correctly.
-  const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date)); // oldest -> newest
+  const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
   const byDate = new Map<string, HistoryDay>();
-
-  // seed map with shallow copies
   for (const h of sorted) byDate.set(h.date, { ...h });
 
   for (const h of sorted) {
@@ -643,7 +635,6 @@ function recomputeHistoryFuelSummaries(history: HistoryDay[]): HistoryDay[] {
     });
   }
 
-  // return in original order (your UI uses existing order)
   return history.map((h) => byDate.get(h.date) ?? h);
 }
 
@@ -662,12 +653,10 @@ export default function App() {
   const [sessionReady, setSessionReady] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
 
-  // login form
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPass, setLoginPass] = useState("");
   const [loginStatus, setLoginStatus] = useState("Not logged in");
 
-  // main state
   const [state, setState] = useState<AppState>(() => defaultState());
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -684,13 +673,11 @@ export default function App() {
     }, 2200);
   }
 
-  // theme apply
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("blp-theme", theme);
   }, [theme]);
 
-  // session init
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -711,7 +698,6 @@ export default function App() {
     };
   }, []);
 
-  // Load per-user state from Supabase when logged in
   useEffect(() => {
     if (!userId) return;
     let cancelled = false;
@@ -737,7 +723,6 @@ export default function App() {
     };
   }, [userId]);
 
-  // Save to Supabase (debounced)
   const saveTimer = useRef<number | null>(null);
   useEffect(() => {
     if (!userId) return;
@@ -750,7 +735,6 @@ export default function App() {
     }, 700);
   }, [state, userId]);
 
-  // midnight rollover: save the day and roll to new local date
   useEffect(() => {
     if (!userId) return;
 
@@ -801,17 +785,16 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, state.daily.date]);
 
-  /* -------------------------
-     Derived views
-  -------------------------- */
   const todaysNotes = useMemo(
     () => state.notes.filter((n) => n.date === state.daily.date),
     [state.notes, state.daily.date]
   );
 
-  const todaysLog = useMemo(() => state.log.filter((e) => e.date === state.daily.date), [state.log, state.daily.date]);
+  const todaysLog = useMemo(
+    () => state.log.filter((e) => e.date === state.daily.date),
+    [state.log, state.daily.date]
+  );
 
-  // ✅ Fuel calculations for today
   const todaysFuel = useMemo(() => {
     const yISO = getYesterdayISO(state.daily.date);
     const yHist = state.history.find((h) => h.date === yISO);
@@ -820,13 +803,9 @@ export default function App() {
       lastTotalFuelFromEntries(yHist?.runningLog ?? []) ??
       null;
 
-    const fuel = computeFuelForDay(todaysLog, prevFuel);
-    return fuel; // { perEntryUsed, usedSum, lastTotalFuel }
+    return computeFuelForDay(todaysLog, prevFuel);
   }, [todaysLog, state.history, state.daily.date]);
 
-  /* -------------------------
-     Weather + Marine
-  -------------------------- */
   async function fetchWeather(lat: number, lon: number) {
     try {
       const u = new URL("https://api.open-meteo.com/v1/forecast");
@@ -869,7 +848,6 @@ export default function App() {
         dewPointC: typeof c.dew_point_2m === "number" ? (c.dew_point_2m as number) : null,
       };
 
-      // marine
       try {
         const m = new URL("https://marine-api.open-meteo.com/v1/marine");
         m.searchParams.set("latitude", String(lat));
@@ -885,7 +863,7 @@ export default function App() {
           wx.waveDirDeg = typeof mc.wave_direction === "number" ? (mc.wave_direction as number) : null;
         }
       } catch {
-        // ignore marine fail
+        // ignore
       }
 
       setState((prev) => ({ ...prev, lastWeather: wx }));
@@ -916,7 +894,6 @@ export default function App() {
     );
   }
 
-  // ✅ UPDATED: degrees + minutes + decimal minutes
   function fromPosFields() {
     const latDeg = Number(state.pos.latDeg);
     const latMin = Number(state.pos.latMin || 0);
@@ -957,24 +934,15 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
-  /* -------------------------
-     Position helpers
-  -------------------------- */
-  // ✅ UPDATED: output as DD°MM.mmm'H
   function composedPos(): string {
     const { latDeg, latMin, latMinDec, latHem, lonDeg, lonMin, lonMinDec, lonHem } = state.pos;
-
     const latDec = String(latMinDec ?? "").padStart(3, "0");
     const lonDec = String(lonMinDec ?? "").padStart(3, "0");
-
     const lat = latDeg && latMin && latHem ? `${latDeg}°${latMin}.${latDec}'${latHem}` : "";
     const lon = lonDeg && lonMin && lonHem ? `${lonDeg}°${lonMin}.${lonDec}'${lonHem}` : "";
     return lat && lon ? `${lat} / ${lon}` : "";
   }
 
-  /* -------------------------
-     Notes
-  -------------------------- */
   const [noteDraft, setNoteDraft] = useState("");
 
   function addNote() {
@@ -987,9 +955,6 @@ export default function App() {
     setNoteDraft("");
   }
 
-  /* -------------------------
-     Running Log (UPDATED)
-  -------------------------- */
   const [entryFields, setEntryFields] = useState({
     courseMagnetic: "",
     courseGyro: "",
@@ -1101,9 +1066,6 @@ export default function App() {
     });
   }
 
-  /* -------------------------
-     Save Day -> History (UPDATED fuel)
-  -------------------------- */
   function saveDayToHistory() {
     setState((prev) => {
       const todays = prev.log.filter((e) => e.date === prev.daily.date);
@@ -1140,9 +1102,6 @@ export default function App() {
     showToast("Saved day to history", true);
   }
 
-  /* -------------------------
-     Backup / Restore
-  -------------------------- */
   function backupNow() {
     const payload = {
       kind: "BridgeLogProBackup",
@@ -1170,9 +1129,6 @@ export default function App() {
     showToast("Restore complete", true);
   }
 
-  /* -------------------------
-     Auth
-  -------------------------- */
   async function doLogin() {
     if (!loginEmail.trim()) {
       setLoginStatus("Enter email");
@@ -1205,7 +1161,7 @@ export default function App() {
   }
 
   /* =========================================================
-     NEW: Edit/Delete Running Log Entries
+     Edit/Delete Running Log Entries
 ========================================================= */
   type EditScope = "today" | "history";
   type EditCtx = { scope: EditScope; dayISO: string; key: string };
@@ -1232,7 +1188,6 @@ export default function App() {
       return { ...prev, log: nextLog };
     }
 
-    // history edit
     const nextHistory = prev.history.map((h) => {
       if (h.date !== ctx.dayISO) return h;
       const nextRunningLog = (h.runningLog ?? []).map((e) => (entryKey(e) === ctx.key ? { ...draft } : e));
@@ -1260,7 +1215,6 @@ export default function App() {
   function saveEditEntry() {
     if (!editCtx || !editDraft) return;
 
-    // Light validation: totalFuel can be blank, but if present it should parse as number.
     const tf = editDraft.totalFuel?.trim() ?? "";
     if (tf && parseNumberLoose(tf) == null) {
       showToast("Total Fuel must be a number (or blank)");
@@ -1282,7 +1236,7 @@ export default function App() {
   }
 
   /* =========================================================
-     Render: Login gate (unchanged)
+     Render: Login gate
 ========================================================= */
   if (!sessionReady) {
     return (
@@ -1353,9 +1307,6 @@ export default function App() {
     );
   }
 
-  /* =========================================================
-     Render: Main App (layout restored)
-========================================================= */
   const wx = state.lastWeather ?? {};
 
   return (
@@ -1406,7 +1357,7 @@ export default function App() {
         </header>
 
         <div className="grid grid-2">
-          {/* Left column stack */}
+          {/* Left column */}
           <div className="stack">
             <div className="col">
               <div className="section">
@@ -1589,7 +1540,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Right column stack */}
+          {/* Right column */}
           <div className="stack">
             <div className="col">
               <div className="section">
@@ -1605,7 +1556,6 @@ export default function App() {
 
                   <div className="muted">Position</div>
 
-                  {/* ✅ UPDATED: position rows use grid so they don't stack */}
                   <div className="pos-row">
                     <input
                       className="mono"
@@ -1806,7 +1756,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Daily Log */}
             <div className="col">
               <div className="section">
                 <h2>Daily Log</h2>
@@ -1908,7 +1857,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Running Log (UPDATED TABLE with Actions) */}
+            {/* Running Log (Tablet-fit columns) */}
             <div className="col">
               <div className="section">
                 <h2 style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1923,19 +1872,31 @@ export default function App() {
                         <th>Time</th>
                         <th>Position</th>
                         <th>C(M)</th>
-                        <th>C(G)</th>
-                        <th>Steer</th>
+
+                        {/* hide on tablet */}
+                        <th className="tablet-hide">C(G)</th>
+                        <th className="tablet-hide">Steer</th>
+
                         <th>Spd</th>
-                        <th>Wind°</th>
+
+                        {/* hide on tablet */}
+                        <th className="tablet-hide">Wind°</th>
+
                         <th>B</th>
-                        <th>Sea</th>
-                        <th>Sky</th>
+
+                        {/* hide on tablet */}
+                        <th className="tablet-hide">Sea</th>
+                        <th className="tablet-hide">Sky</th>
+
                         <th>Vis</th>
                         <th>Baro</th>
                         <th>Air</th>
-                        <th>SeaT</th>
-                        <th>Eng</th>
-                        <th>Watch</th>
+
+                        {/* hide on tablet */}
+                        <th className="tablet-hide">SeaT</th>
+                        <th className="tablet-hide">Eng</th>
+                        <th className="tablet-hide">Watch</th>
+
                         <th>Total Fuel (L)</th>
                         <th>Used (L)</th>
                         <th>Remarks</th>
@@ -1957,32 +1918,34 @@ export default function App() {
                               <td>{r.time}</td>
                               <td>{r.position}</td>
                               <td>{r.courseMagnetic}</td>
-                              <td>{r.courseGyro}</td>
-                              <td>{r.courseSteering}</td>
+
+                              <td className="tablet-hide">{r.courseGyro}</td>
+                              <td className="tablet-hide">{r.courseSteering}</td>
+
                               <td>{r.speed}</td>
-                              <td>{r.windDir}</td>
+
+                              <td className="tablet-hide">{r.windDir}</td>
+
                               <td>{r.windForce}</td>
-                              <td>{r.sea}</td>
-                              <td>{r.sky}</td>
+
+                              <td className="tablet-hide">{r.sea}</td>
+                              <td className="tablet-hide">{r.sky}</td>
+
                               <td>{r.visibility}</td>
                               <td>{r.barometer}</td>
                               <td>{r.airTemp}</td>
-                              <td>{r.seaTemp}</td>
-                              <td>{r.engines}</td>
-                              <td>{r.watchkeeper}</td>
+
+                              <td className="tablet-hide">{r.seaTemp}</td>
+                              <td className="tablet-hide">{r.engines}</td>
+                              <td className="tablet-hide">{r.watchkeeper}</td>
+
                               <td className="mono">{r.totalFuel || "—"}</td>
                               <td className="mono">{used != null ? (Math.round(used * 100) / 100).toString() : "—"}</td>
-                              <td
-                                title={r.remarks}
-                                style={{
-                                  maxWidth: 420,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap",
-                                }}
-                              >
+
+                              <td className="remarks-cell" title={r.remarks}>
                                 {r.remarks || "—"}
                               </td>
+
                               <td style={{ whiteSpace: "nowrap" }}>
                                 <button className="btn" onClick={() => openEdit("today", state.daily.date, r)}>
                                   Edit
@@ -2005,7 +1968,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Daily History (UPDATED table actions) */}
+            {/* Daily History (Tablet-fit columns) */}
             <div className="col">
               <div className="section">
                 <h2>Daily History</h2>
@@ -2085,19 +2048,27 @@ export default function App() {
                                   <th>Time</th>
                                   <th>Position</th>
                                   <th>C(M)</th>
-                                  <th>C(G)</th>
-                                  <th>Steer</th>
+
+                                  <th className="tablet-hide">C(G)</th>
+                                  <th className="tablet-hide">Steer</th>
+
                                   <th>Spd</th>
-                                  <th>Wind°</th>
+
+                                  <th className="tablet-hide">Wind°</th>
+
                                   <th>B</th>
-                                  <th>Sea</th>
-                                  <th>Sky</th>
+
+                                  <th className="tablet-hide">Sea</th>
+                                  <th className="tablet-hide">Sky</th>
+
                                   <th>Vis</th>
                                   <th>Baro</th>
                                   <th>Air</th>
-                                  <th>SeaT</th>
-                                  <th>Eng</th>
-                                  <th>Watch</th>
+
+                                  <th className="tablet-hide">SeaT</th>
+                                  <th className="tablet-hide">Eng</th>
+                                  <th className="tablet-hide">Watch</th>
+
                                   <th>Total Fuel</th>
                                   <th>Remarks</th>
                                   <th>Actions</th>
@@ -2109,21 +2080,29 @@ export default function App() {
                                     <td>{r.time}</td>
                                     <td>{r.position}</td>
                                     <td>{r.courseMagnetic}</td>
-                                    <td>{r.courseGyro}</td>
-                                    <td>{r.courseSteering}</td>
+
+                                    <td className="tablet-hide">{r.courseGyro}</td>
+                                    <td className="tablet-hide">{r.courseSteering}</td>
+
                                     <td>{r.speed}</td>
-                                    <td>{r.windDir}</td>
+
+                                    <td className="tablet-hide">{r.windDir}</td>
+
                                     <td>{r.windForce}</td>
-                                    <td>{r.sea}</td>
-                                    <td>{r.sky}</td>
+
+                                    <td className="tablet-hide">{r.sea}</td>
+                                    <td className="tablet-hide">{r.sky}</td>
+
                                     <td>{r.visibility}</td>
                                     <td>{r.barometer}</td>
                                     <td>{r.airTemp}</td>
-                                    <td>{r.seaTemp}</td>
-                                    <td>{r.engines}</td>
-                                    <td>{r.watchkeeper}</td>
+
+                                    <td className="tablet-hide">{r.seaTemp}</td>
+                                    <td className="tablet-hide">{r.engines}</td>
+                                    <td className="tablet-hide">{r.watchkeeper}</td>
+
                                     <td className="mono">{r.totalFuel || "—"}</td>
-                                    <td>{r.remarks}</td>
+                                    <td className="remarks-cell">{r.remarks}</td>
                                     <td style={{ whiteSpace: "nowrap" }}>
                                       <button className="btn" onClick={() => openEdit("history", h.date, r)}>
                                         Edit
@@ -2151,7 +2130,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* ===== Edit Modal ===== */}
+        {/* Edit Modal */}
         {editOpen && editDraft && editCtx && (
           <div className="modal-backdrop" onClick={closeEdit}>
             <div className="modal" onClick={(e) => e.stopPropagation()}>
