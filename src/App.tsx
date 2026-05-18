@@ -76,6 +76,7 @@ type WeatherState = {
   tempC?: number | null;
   windKts?: number | null;
   windDir?: number | null;
+  windGustKts?: number | null;
   pressure?: number | null;
   visibilityKm?: number | null;
   weatherCode?: number | null;
@@ -464,13 +465,13 @@ function defaultState(): AppState {
 /* =========================================================
    Supabase Storage
 ========================================================= */
-async function loadStateFromSupabase(userId: string): Promise<AppState | null> {
+async function loadStateFromSupabase(userId: string): Promise<{ state: AppState | null; error: string | null }> {
   const { data, error } = await supabase.from("blp_state").select("state").eq("user_id", userId).maybeSingle();
-  if (error) return null;
-  if (!data || !data.state) return null;
+  if (error) return { state: null, error: error.message };
+  if (!data || !data.state) return { state: null, error: null };
 
   const norm = normalizeBackupToState(data.state);
-  return norm ?? null;
+  return { state: norm ?? null, error: norm ? null : "Saved vessel data could not be read." };
 }
 
 async function upsertStateToSupabase(userId: string, state: AppState): Promise<void> {
@@ -488,61 +489,161 @@ async function upsertStateToSupabase(userId: string, state: AppState): Promise<v
 function GlobalStyles() {
   return (
     <style>{`
-      :root { --bg:#f6f7fb; --fg:#0a0a0a; --muted:#60646c; --card:#fff; --card-border:#e7e8ec; --input-bg:#fff; --input-border:#d7d9df; --badge-bg:#f1f3f7; --btn-bg:#111827; --btn-border:#0b1220; --btn-hover:#0d1526; --table-head:#f1f3f7; }
-      html[data-theme="dark"] { --bg:#0b0b0b; --fg:#fff; --muted:#bbb; --card:#111; --card-border:#2a2a2a; --input-bg:#0b0b0b; --input-border:#2a2a2a; --badge-bg:#1a1a1a; --btn-bg:#222; --btn-border:#3a3a3a; --btn-hover:#2a2a2a; --table-head:#0f0f0f; }
+      :root {
+        color-scheme: light;
+        --bg:#e7f0f2; --fg:#10262f; --muted:#5f7680; --card:#fbfefe; --card-border:#c9dce2;
+        --input-bg:#f6fbfc; --input-border:#b8cfd6; --badge-bg:#e2f2f3; --btn-bg:#0b5260;
+        --btn-border:#083d47; --btn-hover:#073f4b; --table-head:#dcecef; --accent:#0d9488;
+        --accent-soft:#d9f2ee; --danger:#a33131; --shadow:0 16px 40px rgba(9,50,62,.12);
+      }
+      html[data-theme="dark"] {
+        color-scheme: dark;
+        --bg:#051216; --fg:#edf8f8; --muted:#91a9af; --card:#0b2026; --card-border:#21434b;
+        --input-bg:#07181d; --input-border:#315861; --badge-bg:#102a31; --btn-bg:#d6a84f;
+        --btn-border:#ebc875; --btn-hover:#c99634; --table-head:#102a31; --accent:#5eead4;
+        --accent-soft:#12383c; --danger:#c24a4a; --shadow:0 20px 50px rgba(0,0,0,.34);
+      }
 
-      html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,Noto Sans; height:auto; min-height:100%;}
-      body{overflow:auto; overflow-x:hidden;} /* ✅ stops page side-scroll */
+      html,body{margin:0;padding:0;background:
+        radial-gradient(circle at top left, rgba(13,148,136,.2), transparent 34rem),
+        linear-gradient(180deg, var(--bg), color-mix(in srgb, var(--bg) 92%, #000 8%));
+        color:var(--fg);font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,Noto Sans; height:auto; min-height:100%;}
+      body{overflow:auto; overflow-x:hidden;}
 
-      .container{max-width:1120px;margin:0 auto;padding:16px}
-      .grid{display:grid;gap:12px}
-      .col{background:var(--card);border:1px solid var(--card-border);border-radius:16px;overflow:hidden}
-      .section{padding:12px 14px}
-      h2{font-size:14px;margin:0 0 8px 0;font-weight:600;color:var(--fg)}
-      h1{font-size:20px;margin:0 0 8px 0;font-weight:700;color:var(--fg)}
+      .container{max-width:1180px;margin:0 auto;padding:18px}
+      .grid{display:grid;gap:14px}
+      .col{background:color-mix(in srgb, var(--card) 96%, transparent);border:1px solid var(--card-border);border-radius:8px;overflow:hidden;box-shadow:var(--shadow)}
+      .section{padding:14px 16px}
+      h2{font-size:13px;margin:0 0 10px 0;font-weight:800;color:var(--fg);letter-spacing:.08em;text-transform:uppercase}
+      h1{font-size:24px;margin:0 0 8px 0;font-weight:800;color:var(--fg)}
       .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-      input,select,textarea{background:var(--input-bg);border:1px solid var(--input-border);color:var(--fg);padding:8px 10px;border-radius:8px;width:100%;box-sizing:border-box}
+      input,select,textarea{background:var(--input-bg);border:1px solid var(--input-border);color:var(--fg);padding:9px 10px;border-radius:7px;width:100%;box-sizing:border-box;outline:none;transition:border-color .16s ease, box-shadow .16s ease, background .16s ease}
+      input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)}
       input::placeholder,textarea::placeholder{color:var(--muted)}
       textarea{min-height:80px}
-      .btn{background:var(--btn-bg);color:#fff;border:1px solid var(--btn-border);padding:8px 12px;border-radius:8px;cursor:pointer}
-      .btn:hover{background:var(--btn-hover)}
-      .muted{color:var(--muted);font-size:12px}
+      .btn{background:var(--btn-bg);color:#fff;border:1px solid var(--btn-border);padding:8px 12px;border-radius:7px;cursor:pointer;font-weight:700;font-size:12px;line-height:1.2;transition:transform .14s ease, background .14s ease, border-color .14s ease, box-shadow .14s ease}
+      html[data-theme="dark"] .btn{color:#081113}
+      .btn:hover{background:var(--btn-hover);transform:translateY(-1px);box-shadow:0 8px 18px color-mix(in srgb, var(--btn-bg) 24%, transparent)}
+      .muted{color:var(--muted);font-size:12px;line-height:1.45}
 
       table{width:100%;border-collapse:collapse;font-size:12px;color:var(--fg)}
-      th,td{text-align:left;padding:6px 8px;white-space:nowrap;border-color:var(--card-border)}
-      thead{background:var(--table-head)}
+      th,td{text-align:left;padding:8px 9px;white-space:nowrap;border-color:var(--card-border)}
+      thead{background:var(--table-head);position:sticky;top:0;z-index:1}
+      th{font-size:11px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.05em}
       tbody tr{border-top:1px solid var(--card-border)}
+      tbody tr:hover{background:color-mix(in srgb, var(--accent-soft) 52%, transparent)}
 
-      .pill{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border-radius:999px;border:1px solid var(--card-border);background:var(--badge-bg);font-size:12px;color:var(--fg)}
-      .badge{display:inline-flex;align-items:center;gap:6px;padding:2px 6px;border-radius:6px;border:1px solid var(--card-border);background:var(--badge-bg);font-size:11px;color:var(--fg)}
+      .pill{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;border:1px solid var(--card-border);background:var(--badge-bg);font-size:12px;font-weight:800;color:var(--fg)}
+      .badge{display:inline-flex;align-items:center;gap:6px;padding:5px 8px;border-radius:6px;border:1px solid var(--card-border);background:var(--badge-bg);font-size:11px;color:var(--fg)}
       .grid-2{display:grid;grid-template-columns:1fr;gap:12px}
       .grid-3{display:grid;grid-template-columns:1fr;gap:12px}
       .grid-4{display:grid;grid-template-columns:1fr;gap:12px}
-      @media(min-width:900px){.grid-2{grid-template-columns:300px 1fr}.grid-3{grid-template-columns:repeat(3,minmax(0,1fr))}.grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}}
+      @media(min-width:900px){.grid-2{grid-template-columns:320px minmax(0,1fr)}.grid-3{grid-template-columns:repeat(3,minmax(0,1fr))}.grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}}
 
-      .table-wrap{overflow:auto; max-width:100%}
-      .stack{display:flex;flex-direction:column;gap:8px}
+      .table-wrap{overflow:auto; max-width:100%;border:1px solid var(--card-border);border-radius:8px}
+      .stack{display:flex;flex-direction:column;gap:12px}
       .right{margin-left:auto}
       .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono','Courier New',monospace}
-      #toast{position:fixed;left:12px;right:12px;bottom:12px;background:#7f1d1d;color:#fff;padding:10px;font-family:ui-monospace,monospace;display:none;z-index:999999;border-radius:10px}
-      details{border:1px solid var(--card-border);border-radius:10px;margin:8px 0;padding:6px;background:transparent}
-      summary{cursor:pointer}
-      .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:999999;display:flex;align-items:center;justify-content:center;padding:16px}
-      .modal{background:var(--card);border:1px solid var(--card-border);border-radius:14px;max-width:720px;width:100%;padding:14px}
-      .danger{background:#7f1d1d !important;border-color:#5f1414 !important}
+      #toast{position:fixed;left:16px;right:16px;bottom:16px;background:#16313a;color:#fff;padding:12px 14px;font-family:ui-monospace,monospace;display:none;z-index:999999;border-radius:8px;box-shadow:var(--shadow)}
+      details{border:1px solid var(--card-border);border-radius:8px;margin:8px 0;padding:8px;background:color-mix(in srgb, var(--badge-bg) 58%, transparent)}
+      summary{cursor:pointer;line-height:1.45}
+      .modal-backdrop{position:fixed;inset:0;background:rgba(3,12,15,.68);z-index:999999;display:flex;align-items:center;justify-content:center;padding:16px;backdrop-filter:blur(8px)}
+      .modal{background:var(--card);border:1px solid var(--card-border);border-radius:8px;max-width:760px;width:100%;padding:16px;box-shadow:var(--shadow)}
+      .danger{background:var(--danger) !important;border-color:color-mix(in srgb, var(--danger) 78%, #000 22%) !important;color:#fff !important}
+      .app-header{align-items:flex-start;justify-content:space-between;margin-bottom:14px;padding:12px 14px;border:1px solid var(--card-border);border-radius:8px;background:color-mix(in srgb, var(--card) 88%, transparent);box-shadow:var(--shadow)}
+      .brand-mark{display:inline-flex;align-items:center;gap:10px}
+      .brand-mark::before{content:"";width:12px;height:32px;border-radius:3px;background:linear-gradient(180deg,var(--accent),color-mix(in srgb, var(--accent) 48%, #fff 52%));box-shadow:0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent)}
+      .brand-title{display:flex;flex-direction:column;gap:3px}
+      .brand-title strong{font-size:18px;line-height:1;font-weight:900}
+      .brand-title span{font-size:11px;color:var(--muted);font-weight:700;letter-spacing:.12em;text-transform:uppercase}
+      .header-actions{justify-content:flex-end}
+      .metric-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:8px}
+      .metric{display:flex;flex-direction:column;gap:3px;padding:8px;border:1px solid var(--card-border);border-radius:7px;background:var(--badge-bg)}
+      .metric span:first-child{font-size:10px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.08em}
+      .metric b{font-size:14px}
+      .login-shell{max-width:760px;margin:9vh auto 0}
+      .loading-shell{max-width:420px;margin:18vh auto 0}
+      .command-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:-4px 0 14px}
+      .command-card{border:1px solid var(--card-border);border-radius:8px;background:color-mix(in srgb,var(--card) 90%,transparent);box-shadow:var(--shadow);padding:12px}
+      .command-card span{display:block;color:var(--muted);font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.08em}
+      .command-card strong{display:block;margin-top:5px;color:var(--fg);font-size:18px;line-height:1.1}
+      .command-card em{display:block;margin-top:4px;color:var(--muted);font-size:11px;font-style:normal;line-height:1.35}
+      .login-panel{overflow:hidden;position:relative}
+      .login-panel::before{content:"";position:absolute;inset:0 0 auto 0;height:5px;background:linear-gradient(90deg,var(--accent),#d6a84f)}
+      .login-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(220px,.9fr);gap:16px;align-items:start}
+      .login-preview{display:grid;gap:8px;border:1px solid var(--card-border);border-radius:8px;background:var(--badge-bg);padding:12px}
+      .preview-row{display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid color-mix(in srgb,var(--card-border) 70%,transparent);padding-bottom:8px}
+      .preview-row:last-child{border-bottom:0;padding-bottom:0}
+      .preview-row span{color:var(--muted);font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.06em}
+      .preview-row strong{font-size:13px;text-align:right}
+      .btn.secondary{background:var(--badge-bg);border-color:var(--card-border);color:var(--fg)}
+      html[data-theme="dark"] .btn.secondary{color:var(--fg)}
+      .btn.secondary:hover{background:var(--accent-soft)}
+      .weather-hero{display:grid;grid-template-columns:72px minmax(0,1fr);gap:12px;align-items:center;border:1px solid var(--card-border);border-radius:8px;background:linear-gradient(135deg,var(--accent-soft),color-mix(in srgb,var(--card) 88%,transparent));padding:12px}
+      .weather-icon{font-size:34px;text-align:center}
+      .weather-hero strong{display:block;font-size:18px}
+      .weather-hero span{display:block;color:var(--muted);font-size:12px;margin-top:3px}
+      .track-panel{display:grid;gap:10px}
+      .track-map{height:340px;border:1px solid var(--card-border);border-radius:8px;background:var(--badge-bg);overflow:hidden;position:relative;isolation:isolate;cursor:grab;touch-action:none}
+      .track-map:active{cursor:grabbing}
+      .track-map.compact{height:185px;margin-top:8px}
+      .track-map.large{height:min(70vh,640px)}
+      .track-modal{max-width:min(1180px,96vw);width:100%;max-height:92vh;overflow:auto}
+      .map-tiles{position:absolute;inset:0;overflow:hidden;background:linear-gradient(180deg,color-mix(in srgb,var(--badge-bg) 80%,transparent),color-mix(in srgb,var(--card) 92%,transparent))}
+      .map-tiles::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(255,255,255,.16),rgba(255,255,255,.05)),radial-gradient(circle at 50% 44%,transparent 0 55%,rgba(8,42,50,.16) 100%);pointer-events:none}
+      html[data-theme="dark"] .map-tiles::after{background:linear-gradient(180deg,rgba(5,18,22,.1),rgba(5,18,22,.34)),radial-gradient(circle at 50% 44%,transparent 0 55%,rgba(0,0,0,.34) 100%)}
+      .map-tile{position:absolute;width:256px;height:256px;max-width:none;user-select:none;filter:saturate(.82) contrast(.96) brightness(1.04)}
+      html[data-theme="dark"] .map-tile{filter:saturate(.72) contrast(.92) brightness(.72)}
+      .map-attribution{position:absolute;right:8px;bottom:6px;z-index:3;border:1px solid var(--card-border);border-radius:6px;background:color-mix(in srgb,var(--card) 88%,transparent);color:var(--muted);font-size:10px;padding:2px 6px}
+      .map-controls{position:absolute;left:8px;top:8px;z-index:4;display:flex;gap:6px;align-items:center;border:1px solid var(--card-border);border-radius:8px;background:color-mix(in srgb,var(--card) 88%,transparent);padding:5px;box-shadow:0 8px 18px rgba(0,0,0,.12)}
+      .map-control-btn{min-width:30px;height:28px;border:1px solid var(--card-border);border-radius:6px;background:var(--badge-bg);color:var(--fg);font-weight:900;cursor:pointer;line-height:1;padding:0 7px}
+      .map-control-btn:hover{background:var(--accent-soft)}
+      .map-control-label{font-size:10px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.06em;padding:0 4px;white-space:nowrap}
+      .track-map svg{position:relative;z-index:2;display:block;width:100%;height:100%}
+      .track-line-under{fill:none;stroke:rgba(255,255,255,.84);stroke-width:8;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 2px 4px rgba(0,0,0,.28))}
+      .track-line{fill:none;stroke:var(--accent);stroke-width:4;stroke-linecap:round;stroke-linejoin:round}
+      .track-dot{fill:var(--btn-bg);stroke:var(--card);stroke-width:2.5}
+      .track-dot.start{fill:#fff;stroke:var(--accent);stroke-width:3}
+      .track-dot.latest{fill:var(--accent);stroke:#fff;stroke-width:3;filter:drop-shadow(0 2px 4px rgba(0,0,0,.28))}
+      html[data-theme="dark"] .track-dot{fill:var(--btn-bg)}
+      .track-label{font-weight:800;paint-order:stroke;stroke:var(--card);stroke-width:4px;stroke-linejoin:round}
+      .track-label.subtle{font-weight:700;fill:var(--muted);stroke:var(--card);stroke-width:3px}
+      .track-bearing-label{font-weight:800;paint-order:stroke;stroke:var(--card);stroke-width:4px;stroke-linejoin:round;fill:var(--fg)}
+      .track-grid{stroke:color-mix(in srgb,var(--fg) 16%,transparent);stroke-width:1;stroke-dasharray:3 6}
+      .track-empty{display:grid;min-height:170px;place-items:center;text-align:center;color:var(--muted);font-size:12px;line-height:1.45;padding:18px}
+      .track-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+      .entry-card{order:1}.running-log-card{order:2}.daily-log-card{order:3}.track-card{order:4}.history-card{order:5}
+      .course-leg-list{display:grid;gap:6px;margin-top:10px}
+      .course-leg{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;border:1px solid var(--card-border);border-radius:7px;background:var(--badge-bg);padding:7px 8px;font-size:12px}
+      .course-leg b{font-size:13px}
+      .trip-list{display:grid;gap:8px;margin-top:10px}
+      .trip-card{border:1px solid var(--card-border);border-radius:8px;background:var(--badge-bg);padding:0;overflow:hidden}
+      .trip-card summary{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;cursor:pointer;list-style:none;padding:10px}
+      .trip-card summary::-webkit-details-marker{display:none}
+      .trip-card summary::after{content:"Plot";align-self:start;grid-column:2;color:var(--muted);font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.06em}
+      .trip-card[open] summary::after{content:"Hide"}
+      .trip-plot{border-top:1px solid var(--card-border);padding:10px;background:color-mix(in srgb,var(--card) 62%,transparent)}
+      .trip-card strong{display:block;font-size:14px;margin-bottom:4px}
+      .trip-meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--muted);font-size:12px}
+      .trip-metrics{display:grid;grid-template-columns:repeat(2,minmax(80px,1fr));gap:8px;min-width:180px}
+      .trip-metrics .metric{background:var(--card)}
 
-      /* Keep Lat/Lon inputs on one line */
       .pos-row{display:grid;grid-template-columns:1fr 1fr 1fr 72px;gap:8px;align-items:center}
       .pos-row input,.pos-row select{width:100%}
       @media(max-width:420px){.pos-row{grid-template-columns:1fr 1fr 1fr 64px}}
 
-      /* ✅ Tablet fit: hide less-important columns so the table doesn't force horizontal page scroll */
       @media (max-width: 1100px){
         .tablet-hide{display:none !important;}
         th,td{padding:6px 6px;font-size:11px;}
         .remarks-cell{white-space:normal;max-width:260px;}
       }
-    `}</style>
+      @media (max-width: 720px){
+        .container{padding:10px}
+        .section{padding:12px}
+        .app-header{padding:10px}
+        .header-actions{justify-content:flex-start}
+        .btn{padding:8px 10px}
+      }    `}</style>
   );
 }
 
@@ -638,6 +739,247 @@ function recomputeHistoryFuelSummaries(history: HistoryDay[]): HistoryDay[] {
   return history.map((h) => byDate.get(h.date) ?? h);
 }
 
+
+type TrackPoint = {
+  lat: number;
+  lon: number;
+  time: string;
+  label: string;
+  courseMagnetic?: string;
+  remarks?: string;
+};
+
+function parseLoggedPosition(position: string, time = ""): TrackPoint | null {
+  const match = position.match(/(\d+(?:\.\d+)?)°(\d+(?:\.\d+)?)'([NS])\s*\/\s*(\d+(?:\.\d+)?)°(\d+(?:\.\d+)?)'([EW])/i);
+  if (!match) return null;
+
+  const latDeg = Number(match[1]);
+  const latMin = Number(match[2]);
+  const latHem = match[3].toUpperCase();
+  const lonDeg = Number(match[4]);
+  const lonMin = Number(match[5]);
+  const lonHem = match[6].toUpperCase();
+
+  if (![latDeg, latMin, lonDeg, lonMin].every(Number.isFinite)) return null;
+
+  const lat = (latDeg + latMin / 60) * (latHem === "S" ? -1 : 1);
+  const lon = (lonDeg + lonMin / 60) * (lonHem === "W" ? -1 : 1);
+
+  return { lat, lon, time, label: position };
+}
+
+function distanceNm(a: TrackPoint, b: TrackPoint): number {
+  const radiusNm = 3440.065;
+  const toRad = (n: number) => (n * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lon - a.lon);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+
+  return 2 * radiusNm * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+
+function bearingDeg(a: TrackPoint, b: TrackPoint): number {
+  const toRad = (n: number) => (n * Math.PI) / 180;
+  const toDeg = (n: number) => (n * 180) / Math.PI;
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const dLon = toRad(b.lon - a.lon);
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+function fmtDeg(value: number): string {
+  return `${String(Math.round(value)).padStart(3, "0")}°`;
+}
+
+function buildTrack(entries: RunningEntry[]) {
+  const points = entries
+    .slice()
+    .reverse()
+    .map((entry) => {
+      const point = parseLoggedPosition(entry.position, entry.time);
+      return point ? { ...point, courseMagnetic: entry.courseMagnetic, remarks: entry.remarks } : null;
+    })
+    .filter((point): point is NonNullable<typeof point> => point != null);
+
+  const legs = points.slice(1).map((point, idx) => {
+    const from = points[idx];
+    const distance = distanceNm(from, point);
+    const bearing = bearingDeg(from, point);
+    return { from, to: point, distance, bearing };
+  });
+
+  const totalNm = legs.reduce((sum, leg) => sum + leg.distance, 0);
+  const lastLegNm = legs.at(-1)?.distance ?? 0;
+
+  return { points, legs, totalNm, lastLegNm };
+}
+
+function fmtNm(value: number): string {
+  return `${Math.round(value * 10) / 10} NM`;
+}
+
+type TrackShape = {
+  points: TrackPoint[];
+  legs: Array<{ from: TrackPoint; to: TrackPoint; distance: number; bearing: number }>;
+  totalNm: number;
+  lastLegNm: number;
+};
+
+function trackZoom(points: TrackPoint[], width: number, height: number): number {
+  const padX = 116;
+  const padY = 92;
+  for (let zoom = 16; zoom >= 5; zoom -= 1) {
+    const pixels = points.map((point) => worldPixel(point.lat, point.lon, zoom));
+    const minX = Math.min(...pixels.map((p) => p.x));
+    const maxX = Math.max(...pixels.map((p) => p.x));
+    const minY = Math.min(...pixels.map((p) => p.y));
+    const maxY = Math.max(...pixels.map((p) => p.y));
+    if (maxX - minX <= width - padX && maxY - minY <= height - padY) return zoom;
+  }
+  return 5;
+}
+
+function worldPixel(lat: number, lon: number, zoom: number) {
+  const size = 256 * 2 ** zoom;
+  const clampedLat = Math.max(-85.0511, Math.min(85.0511, lat));
+  const sinLat = Math.sin((clampedLat * Math.PI) / 180);
+  return { x: ((lon + 180) / 360) * size, y: (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * size };
+}
+
+function clampPlotLabel(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function clampMapZoom(value: number): number {
+  return Math.max(5, Math.min(17, value));
+}
+
+function TrackPlotView({ track, emptyText, compact = false, large = false }: { track: TrackShape; emptyText: string; compact?: boolean; large?: boolean }) {
+  const [zoomOffset, setZoomOffset] = useState(0);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const dragRef = useRef<{ x: number; y: number; pan: { x: number; y: number } } | null>(null);
+  const fallbackHeight = large ? 420 : compact ? 190 : 340;
+  const mapRef = useRef<HTMLDivElement | null>(null);
+  const [mapSize, setMapSize] = useState({ width: 520, height: fallbackHeight });
+
+  useEffect(() => {
+    const el = mapRef.current;
+    if (!el) return;
+
+    const updateSize = () => {
+      const rect = el.getBoundingClientRect();
+      setMapSize({
+        width: Math.max(520, Math.round(rect.width)),
+        height: Math.max(160, Math.round(rect.height || fallbackHeight)),
+      });
+    };
+
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [fallbackHeight]);
+  if (track.points.length < 2) return <div className="track-empty">{emptyText}</div>;
+
+  const width = mapSize.width;
+  const height = mapSize.height;
+  const fittedZoom = trackZoom(track.points, width, height);
+  const zoom = clampMapZoom(fittedZoom + zoomOffset);
+  const projected = track.points.map((point) => worldPixel(point.lat, point.lon, zoom));
+  const minX = Math.min(...projected.map((p) => p.x));
+  const maxX = Math.max(...projected.map((p) => p.x));
+  const minY = Math.min(...projected.map((p) => p.y));
+  const maxY = Math.max(...projected.map((p) => p.y));
+  const center = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+  const topLeft = { x: center.x - width / 2 - pan.x, y: center.y - height / 2 - pan.y };
+  const tileMinX = Math.floor(topLeft.x / 256);
+  const tileMaxX = Math.floor((topLeft.x + width) / 256);
+  const tileMinY = Math.floor(topLeft.y / 256);
+  const tileMaxY = Math.floor((topLeft.y + height) / 256);
+  const tileLimit = 2 ** zoom;
+  const tiles: Array<{ key: string; left: number; top: number; url: string }> = [];
+  for (let x = tileMinX; x <= tileMaxX; x += 1) {
+    for (let y = tileMinY; y <= tileMaxY; y += 1) {
+      if (y < 0 || y >= tileLimit) continue;
+      const wrappedX = ((x % tileLimit) + tileLimit) % tileLimit;
+      tiles.push({ key: `${zoom}-${wrappedX}-${y}`, left: x * 256 - topLeft.x, top: y * 256 - topLeft.y, url: `https://tile.openstreetmap.org/${zoom}/${wrappedX}/${y}.png` });
+    }
+  }
+  const pts = track.points.map((point) => {
+    const px = worldPixel(point.lat, point.lon, zoom);
+    return { x: px.x - topLeft.x, y: px.y - topLeft.y, time: point.time, courseMagnetic: point.courseMagnetic };
+  });
+  const linePoints = pts.map((p) => `${p.x},${p.y}`).join(" ");
+  const className = large ? "track-map large" : compact ? "track-map compact" : "track-map";
+  const resetView = () => {
+    setZoomOffset(0);
+    setPan({ x: 0, y: 0 });
+  };
+  const startPan = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    if (event.target instanceof Element && event.target.closest(".map-controls")) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = { x: event.clientX, y: event.clientY, pan };
+  };
+  const movePan = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    setPan({ x: drag.pan.x + event.clientX - drag.x, y: drag.pan.y + event.clientY - drag.y });
+  };
+  const endPan = (event: React.PointerEvent<HTMLDivElement>) => {
+    dragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+
+  return (
+    <>
+      <div ref={mapRef} className={className} aria-label="Position track plot over map" onPointerDown={startPan} onPointerMove={movePan} onPointerUp={endPan} onPointerCancel={endPan} onDoubleClick={resetView}>
+        <div className="map-tiles" aria-hidden="true">
+          {tiles.map((tile) => <img className="map-tile" key={tile.key} src={tile.url} alt="" loading="lazy" referrerPolicy="no-referrer" style={{ left: tile.left, top: tile.top }} />)}
+        </div>
+        <div className="map-controls" aria-label="Map controls">
+          <button className="map-control-btn" type="button" onClick={() => setZoomOffset((z) => Math.min(z + 1, 4))}>+</button>
+          <button className="map-control-btn" type="button" onClick={() => setZoomOffset((z) => Math.max(z - 1, -2))}>-</button>
+          <button className="map-control-btn" type="button" onClick={resetView} title="Fit track">Fit</button>
+          <span className="map-control-label">z{zoom}</span>
+        </div>
+        <svg viewBox={`0 0 ${width} ${height}`} role="img">
+          {[0.25, 0.5, 0.75].map((ratio) => <g key={ratio}><line className="track-grid" x1={width * ratio} y1="18" x2={width * ratio} y2={height - 18} /><line className="track-grid" x1="18" y1={height * ratio} x2={width - 18} y2={height * ratio} /></g>)}
+          <polyline className="track-line-under" points={linePoints} />
+          <polyline className="track-line" points={linePoints} />
+          {track.legs.map((leg, idx) => {
+            const a = pts[idx];
+            const b = pts[idx + 1];
+            if (!a || !b) return null;
+            const labelX = clampPlotLabel((a.x + b.x) / 2 + 6, 26, width - 96);
+            const labelY = clampPlotLabel((a.y + b.y) / 2 + 12, 24, height - 18);
+            return <text className="track-bearing-label" key={`${leg.from.time}-${leg.to.time}`} x={labelX} y={labelY} fontSize={large ? "11" : "10"}>{fmtDeg(leg.bearing)} / {fmtNm(leg.distance)}</text>;
+          })}
+          {pts.map((p, idx) => {
+            const isStart = idx === 0;
+            const isLatest = idx === pts.length - 1;
+            const label = isStart ? "Start" : isLatest ? "Latest" : p.time;
+            const labelX = clampPlotLabel(p.x + 9, 14, width - 74);
+            const labelY = clampPlotLabel(p.y - 10, 18, height - 26);
+            return <g key={`${p.time}-${idx}`}><circle className={`track-dot ${isStart ? "start" : ""} ${isLatest ? "latest" : ""}`} cx={p.x} cy={p.y} r={isLatest ? 6.5 : isStart ? 5.5 : 4} /><text className="track-label" x={labelX} y={labelY} fontSize={large ? "11" : "10"} fill="currentColor">{label} {isStart || isLatest ? p.time : ""}</text>{p.courseMagnetic ? <text className="track-label subtle" x={labelX} y={labelY + 13} fontSize="9">C {p.courseMagnetic}M</text> : null}</g>;
+          })}
+        </svg>
+        <div className="map-attribution">OSM • z{zoom}</div>
+      </div>
+      <div className="track-stats"><div className="metric"><span>Total Track</span><b>{fmtNm(track.totalNm)}</b></div><div className="metric"><span>Last Leg</span><b>{fmtNm(track.lastLegNm)}</b></div><div className="metric"><span>Fixes</span><b>{track.points.length}</b></div></div>
+      <div className="course-leg-list" aria-label="Course legs">{track.legs.map((leg, idx) => <div className="course-leg" key={`${leg.from.time}-${leg.to.time}-${idx}`}><b>{fmtDeg(leg.bearing)}</b><span>{leg.from.time} - {leg.to.time}</span><span className="mono">{fmtNm(leg.distance)}</span></div>)}</div>
+    </>
+  );
+}function windSummary(wx: WeatherState): string {
+  if (wx.windKts == null) return "Set position for live wind";
+  const gust = wx.windGustKts != null ? `, gust ${wx.windGustKts} kt` : "";
+  return `${wx.windKts} kt @ ${wx.windDir ?? "--"}°${gust}`;
+}
 /* =========================================================
    App
 ========================================================= */
@@ -652,14 +994,18 @@ export default function App() {
 
   const [sessionReady, setSessionReady] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
+  const [stateHydrated, setStateHydrated] = useState(false);
+  const [stateLoadError, setStateLoadError] = useState<string | null>(null);
 
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPass, setLoginPass] = useState("");
   const [loginStatus, setLoginStatus] = useState("Not logged in");
 
   const [state, setState] = useState<AppState>(() => defaultState());
+  const [mapOpen, setMapOpen] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const remoteSaveArmed = useRef(false);
 
   function showToast(msg: string, ok = false) {
     setToast(ok ? `✓ ${msg}` : `BridgeLog Pro: ${msg}`);
@@ -699,23 +1045,52 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!userId) return;
+    if (saveTimer.current) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+
+    if (!userId) {
+      setStateHydrated(false);
+      setStateLoadError(null);
+      setState(defaultState());
+      return;
+    }
+
     let cancelled = false;
+    setStateHydrated(false);
+    setStateLoadError(null);
 
     (async () => {
       const cacheKey = `blp-cache-${userId}`;
+      let loadedState: AppState | null = null;
       const cached = localStorage.getItem(cacheKey);
+
       if (cached) {
         const parsed = safeParseJSON(cached);
         const norm = normalizeBackupToState(parsed);
-        if (norm && !cancelled) setState(norm);
+        if (norm && !cancelled) {
+          loadedState = norm;
+          setState(norm);
+        }
       }
 
       const remote = await loadStateFromSupabase(userId);
-      if (remote && !cancelled) {
-        setState(remote);
-        localStorage.setItem(cacheKey, JSON.stringify(remote));
+      if (cancelled) return;
+
+      if (remote.error) {
+        setStateLoadError(remote.error);
+        return;
       }
+
+      if (remote.state) {
+        loadedState = remote.state;
+        setState(remote.state);
+        localStorage.setItem(cacheKey, JSON.stringify(remote.state));
+      }
+
+      if (!loadedState) setState(defaultState());
+      setStateHydrated(true);
     })();
 
     return () => {
@@ -725,7 +1100,11 @@ export default function App() {
 
   const saveTimer = useRef<number | null>(null);
   useEffect(() => {
-    if (!userId) return;
+    if (!userId || !stateHydrated || stateLoadError) return;
+    if (!remoteSaveArmed.current) {
+      remoteSaveArmed.current = true;
+      return;
+    }
     const cacheKey = `blp-cache-${userId}`;
     localStorage.setItem(cacheKey, JSON.stringify(state));
 
@@ -733,7 +1112,11 @@ export default function App() {
     saveTimer.current = window.setTimeout(() => {
       void upsertStateToSupabase(userId, { ...state, updatedAtISO: new Date().toISOString() });
     }, 700);
-  }, [state, userId]);
+
+    return () => {
+      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    };
+  }, [state, userId, stateHydrated, stateLoadError]);
 
   useEffect(() => {
     if (!userId) return;
@@ -806,6 +1189,8 @@ export default function App() {
     return computeFuelForDay(todaysLog, prevFuel);
   }, [todaysLog, state.history, state.daily.date]);
 
+  const todaysTrack = useMemo(() => buildTrack(todaysLog), [todaysLog]);
+
   async function fetchWeather(lat: number, lon: number) {
     try {
       const u = new URL("https://api.open-meteo.com/v1/forecast");
@@ -817,6 +1202,7 @@ export default function App() {
           "temperature_2m",
           "wind_speed_10m",
           "wind_direction_10m",
+          "wind_gusts_10m",
           "pressure_msl",
           "visibility",
           "weather_code",
@@ -838,6 +1224,7 @@ export default function App() {
         tempC: typeof c.temperature_2m === "number" ? c.temperature_2m : null,
         windKts: typeof c.wind_speed_10m === "number" ? c.wind_speed_10m : null,
         windDir: typeof c.wind_direction_10m === "number" ? c.wind_direction_10m : null,
+        windGustKts: typeof c.wind_gusts_10m === "number" ? c.wind_gusts_10m : null,
         pressure: typeof c.pressure_msl === "number" ? c.pressure_msl : null,
         visibilityKm: typeof c.visibility === "number" ? (c.visibility as number) / 1000 : null,
         weatherCode: typeof c.weather_code === "number" ? c.weather_code : null,
@@ -1261,9 +1648,9 @@ export default function App() {
         <div id="toast">{toast}</div>
 
         <div className="container">
-          <header className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
+          <header className="row app-header">
             <div className="row">
-              <div className="pill">BridgeLog Pro</div>
+              <div className="brand-mark"><div className="brand-title"><strong>BridgeLog Pro</strong><span>Vessel logbook</span></div></div>
               <div className="badge mono">Login</div>
             </div>
             <div className="row">
@@ -1273,9 +1660,10 @@ export default function App() {
             </div>
           </header>
 
-          <div className="col">
-            <div className="section">
-              <h2>Vessel Login</h2>
+          <div className="col login-panel">
+            <div className="section login-grid">
+              <div>
+                <h2>Vessel Login</h2>
               <div className="grid-3">
                 <input
                   value={loginEmail}
@@ -1297,9 +1685,48 @@ export default function App() {
                 {loginStatus}
               </div>
 
+              
               <div className="muted" style={{ marginTop: 8 }}>
                 One login per vessel → each login has its own saved data automatically.
               </div>
+              </div>
+              <div className="login-preview" aria-label="Logbook preview">
+                <div className="preview-row"><span>Today</span><strong>{prettyDate(todayISO())}</strong></div>
+                <div className="preview-row"><span>Mode</span><strong>Daily bridge log</strong></div>
+                <div className="preview-row"><span>Weather</span><strong>Ready for position</strong></div>
+                <div className="preview-row"><span>Storage</span><strong>Cloud + local cache</strong></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  if (!stateHydrated || stateLoadError) {
+    return (
+      <>
+        <GlobalStyles />
+        <div id="toast">{toast}</div>
+        <div className="container loading-shell">
+          <div className="col">
+            <div className="section">
+              <h1>BridgeLog Pro</h1>
+              <div className="muted">
+                {stateLoadError
+                  ? `Supabase load failed: ${stateLoadError}. Autosave is paused so existing vessel data is not overwritten.`
+                  : "Loading vessel log from Supabase…"}
+              </div>
+              {stateLoadError ? (
+                <div className="row" style={{ marginTop: 10 }}>
+                  <button className="btn" onClick={() => window.location.reload()}>
+                    Retry
+                  </button>
+                  <button className="btn secondary" onClick={() => void doLogout()}>
+                    Logout
+                  </button>
+                </div>
+              ) : null}
             </div>
           </div>
         </div>
@@ -1315,9 +1742,9 @@ export default function App() {
       <div id="toast">{toast}</div>
 
       <div className="container">
-        <header className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
+        <header className="row app-header">
           <div className="row">
-            <div className="pill">BridgeLog Pro</div>
+            <div className="brand-mark"><div className="brand-title"><strong>BridgeLog Pro</strong><span>Vessel logbook</span></div></div>
             <div className="badge mono" title="Location label">
               {state.locLabel}
             </div>
@@ -1333,10 +1760,10 @@ export default function App() {
             <button className="btn" onClick={fromPosFields}>
               From position fields
             </button>
-            <button className="btn" onClick={backupNow}>
+            <button className="btn secondary" onClick={backupNow}>
               Backup JSON
             </button>
-            <button className="btn" onClick={() => fileInputRef.current?.click()}>
+            <button className="btn secondary" onClick={() => fileInputRef.current?.click()}>
               Restore JSON
             </button>
             <input
@@ -1350,11 +1777,18 @@ export default function App() {
                 e.currentTarget.value = "";
               }}
             />
-            <button className="btn" onClick={() => void doLogout()}>
+            <button className="btn secondary" onClick={() => void doLogout()}>
               Logout
             </button>
           </div>
         </header>
+
+        <div className="command-strip" aria-label="Operational glance">
+          <div className="command-card"><span>Today</span><strong>{todaysLog.length}</strong><em>running entries</em></div>
+          <div className="command-card"><span>Notes</span><strong>{todaysNotes.length}</strong><em>daily handover items</em></div>
+          <div className="command-card"><span>Fuel Used</span><strong>{Math.round(todaysFuel.usedSum * 100) / 100} L</strong><em>computed from totals</em></div>
+          <div className="command-card"><span>Weather</span><strong>{wx.condition ?? "Unset"}</strong><em>{state.locLabel}</em></div>
+        </div>
 
         <div className="grid grid-2">
           {/* Left column */}
@@ -1454,9 +1888,12 @@ export default function App() {
                   </span>
                 </div>
 
-                <div className="row" style={{ marginTop: 8 }}>
-                  <span>{wxIcon(wx.weatherCode)}</span>&nbsp;
-                  <b>{wx.condition ?? "—"}</b>
+                <div className="weather-hero" style={{ marginTop: 8 }}>
+                  <div className="weather-icon">{wxIcon(wx.weatherCode)}</div>
+                  <div>
+                    <strong>{wx.condition ?? "Weather not set"}</strong>
+                    <span>{windSummary(wx)}</span>
+                  </div>
                 </div>
 
                 <div className="row" style={{ marginTop: 6 }}>
@@ -1542,7 +1979,7 @@ export default function App() {
 
           {/* Right column */}
           <div className="stack">
-            <div className="col">
+            <div className="col entry-card">
               <div className="section">
                 <h2>New Running Log Entry</h2>
 
@@ -1690,7 +2127,7 @@ export default function App() {
                     ))}
                   </select>
                 </div>
-
+               
                 <div className="grid-4" style={{ marginTop: 6 }}>
                   <select
                     value={entryFields.visibility}
@@ -1756,7 +2193,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="col">
+            <div className="col daily-log-card">
               <div className="section">
                 <h2>Daily Log</h2>
 
@@ -1805,6 +2242,9 @@ export default function App() {
                 <div className="row" style={{ marginTop: 6 }}>
                   <div className="badge">
                     ⛽ Fuel used today: <span className="right">{Math.round(todaysFuel.usedSum * 100) / 100} L</span>
+                  </div>
+                  <div className="badge">
+                    Daily NM: <span className="right">{fmtNm(todaysTrack.totalNm)}</span>
                   </div>
                   <span className="muted right">
                     Last total fuel: {todaysFuel.lastTotalFuel != null ? todaysFuel.lastTotalFuel : "—"}
@@ -1857,8 +2297,24 @@ export default function App() {
               </div>
             </div>
 
+            <div className="col track-card">
+              <div className="section track-panel">
+                <h2 style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  Track Plot
+                  <button className="btn secondary right" type="button" onClick={() => setMapOpen(true)}>
+                    Large Chart
+                  </button>
+                  <span className="muted">{todaysTrack.points.length} fixes</span>
+                </h2>
+
+                <TrackPlotView
+                  track={todaysTrack}
+                  emptyText="Add two running log entries with positions and BridgeLog Pro will plot the day track over a map and calculate NM between fixes."
+                />
+              </div>
+            </div>
             {/* Running Log (Tablet-fit columns) */}
-            <div className="col">
+            <div className="col running-log-card">
               <div className="section">
                 <h2 style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   Running Log
@@ -1969,7 +2425,7 @@ export default function App() {
             </div>
 
             {/* Daily History (Tablet-fit columns) */}
-            <div className="col">
+            <div className="col history-card">
               <div className="section">
                 <h2>Daily History</h2>
 
@@ -1983,6 +2439,7 @@ export default function App() {
                         {h.fuelSummary?.usedLitres != null ? (
                           <span className="muted"> • ⛽ {h.fuelSummary.usedLitres} L</span>
                         ) : null}
+                        <span className="muted"> • {fmtNm(buildTrack(h.runningLog || []).totalNm)}</span>
                       </summary>
 
                       <div className="grid-3" style={{ marginTop: 6 }}>
@@ -2035,6 +2492,17 @@ export default function App() {
                               </div>
                             ))}
                           </div>
+                        </div>
+
+                        <div style={{ gridColumn: "1 / -1" }}>
+                          <div>
+                            <b>Track Plot</b>
+                          </div>
+                          <TrackPlotView
+                            track={buildTrack(h.runningLog || [])}
+                            emptyText="No plotted positions saved for this day."
+                            compact
+                          />
                         </div>
 
                         <div style={{ gridColumn: "1 / -1" }}>
@@ -2130,6 +2598,23 @@ export default function App() {
           </div>
         </div>
 
+        {mapOpen && (
+          <div className="modal-backdrop" onClick={() => setMapOpen(false)}>
+            <div className="modal track-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
+                <h2 style={{ margin: 0 }}>Large Track Plot</h2>
+                <button className="btn secondary" type="button" onClick={() => setMapOpen(false)}>
+                  Close
+                </button>
+              </div>
+              <TrackPlotView
+                track={todaysTrack}
+                emptyText="Add two running log entries with positions and BridgeLog Pro will plot the day track over a map."
+                large
+              />
+            </div>
+          </div>
+        )}
         {/* Edit Modal */}
         {editOpen && editDraft && editCtx && (
           <div className="modal-backdrop" onClick={closeEdit}>
