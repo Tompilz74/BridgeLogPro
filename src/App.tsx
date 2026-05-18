@@ -628,9 +628,10 @@ function GlobalStyles() {
       .trip-metrics{display:grid;grid-template-columns:repeat(2,minmax(80px,1fr));gap:8px;min-width:180px}
       .trip-metrics .metric{background:var(--card)}
 
-      .pos-row{display:grid;grid-template-columns:1fr 1fr 1fr 72px;gap:8px;align-items:center}
-      .pos-row input,.pos-row select{width:100%}
-      @media(max-width:420px){.pos-row{grid-template-columns:1fr 1fr 1fr 64px}}
+      .pos-row{display:grid;grid-template-columns:minmax(82px,1fr) minmax(82px,1fr) minmax(112px,1.2fr) 76px;gap:10px;align-items:center}
+      .pos-row input,.pos-row select{width:100%;min-width:0}
+      @media(max-width:720px){.pos-row{grid-template-columns:minmax(74px,1fr) minmax(74px,1fr) minmax(96px,1.2fr) 68px;gap:8px}}
+      @media(max-width:460px){.pos-row{grid-template-columns:1fr 1fr 76px}.pos-row input:nth-child(3){grid-column:1 / 3}}
 
       @media (max-width: 1100px){
         .tablet-hide{display:none !important;}
