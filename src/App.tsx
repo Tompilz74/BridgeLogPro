@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
+import {
+  createVesselPositionProvider,
+  getConfiguredGpsSourceUrl,
+  setConfiguredGpsSourceUrl,
+  type VesselPosition,
+} from "./services/VesselPositionProvider";
 
 /* =========================================================
    Supabase Config
@@ -12,6 +18,7 @@ const SUPABASE_ANON_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh3anhvamtrbXZxcHdzdXhiamx3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU2MDgzMTgsImV4cCI6MjA4MTE4NDMxOH0.00_yWsIDZdbdlSMlT5sxubiaEsw6FHXxxzcyt7fW2FI";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const WEATHER_REFRESH_MS = 10 * 60_000;
 
 /* =========================================================
    Types
@@ -1005,9 +1012,17 @@ export default function App() {
 
   const [state, setState] = useState<AppState>(() => defaultState());
   const [mapOpen, setMapOpen] = useState(false);
+  const [gpsSourceUrl, setGpsSourceUrlValue] = useState(() => getConfiguredGpsSourceUrl());
+  const [vesselPosition, setVesselPosition] = useState<VesselPosition | null>(null);
+  const [manualPositionOverride, setManualPositionOverride] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const remoteSaveArmed = useRef(false);
+  const weatherPositionRef = useRef<{ lat: number; lon: number; fetchedAt: number } | null>(null);
+  const vesselPositionProvider = useMemo(
+    () => createVesselPositionProvider({ gpsSourceUrl }),
+    [gpsSourceUrl]
+  );
 
   function showToast(msg: string, ok = false) {
     setToast(ok ? `✓ ${msg}` : `BridgeLog Pro: ${msg}`);
@@ -1192,6 +1207,22 @@ export default function App() {
   }, [todaysLog, state.history, state.daily.date]);
 
   const todaysTrack = useMemo(() => buildTrack(todaysLog), [todaysLog]);
+  const activeCoords = vesselPosition && !manualPositionOverride
+    ? { lat: vesselPosition.latitude, lon: vesselPosition.longitude }
+    : state.coords;
+  const activeLocLabel = vesselPosition && !manualPositionOverride
+    ? `${vesselPosition.latitude.toFixed(4)}, ${vesselPosition.longitude.toFixed(4)}`
+    : state.locLabel;
+  const gpsStatus = vesselPosition?.sourceStatus ?? "BR1 GPS (Stale)";
+  const gpsTelemetry = vesselPosition
+    ? [
+        vesselPosition.speedKts != null ? `${vesselPosition.speedKts} kt` : null,
+        vesselPosition.headingDeg != null ? `${Math.round(vesselPosition.headingDeg)}°` : null,
+        vesselPosition.timestamp ? new Date(vesselPosition.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : null,
+      ]
+        .filter(Boolean)
+        .join(" • ")
+    : "Waiting for Northern Escape GPS";
 
   async function fetchWeather(lat: number, lon: number) {
     try {
@@ -1261,28 +1292,59 @@ export default function App() {
     }
   }
 
-  function useGeo() {
-    if (!("geolocation" in navigator)) {
-      showToast("Geolocation unavailable");
-      return;
-    }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const lat = Number(pos.coords.latitude.toFixed(4));
-        const lon = Number(pos.coords.longitude.toFixed(4));
-        const label = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
-        setState((prev) => ({
-          ...prev,
-          coords: { lat, lon },
-          locLabel: label,
-        }));
-        void fetchWeather(lat, lon);
-      },
-      (err) => showToast(err.message || "Location denied"),
-      { enableHighAccuracy: true, maximumAge: 60000, timeout: 12000 }
-    );
+  function posFieldsFromDecimal(lat: number, lon: number): PosState {
+    const toParts = (value: number, positive: "N" | "E", negative: "S" | "W") => {
+      const abs = Math.abs(value);
+      const deg = Math.floor(abs);
+      const minutesTotal = (abs - deg) * 60;
+      const min = Math.floor(minutesTotal);
+      const minDec = Math.round((minutesTotal - min) * 1000);
+      return {
+        deg: String(deg),
+        min: String(min).padStart(2, "0"),
+        minDec: String(minDec).padStart(3, "0"),
+        hem: value >= 0 ? positive : negative,
+      };
+    };
+
+    const latParts = toParts(lat, "N", "S");
+    const lonParts = toParts(lon, "E", "W");
+    return {
+      latDeg: latParts.deg,
+      latMin: latParts.min,
+      latMinDec: latParts.minDec,
+      latHem: latParts.hem as "N" | "S",
+      lonDeg: lonParts.deg,
+      lonMin: lonParts.min,
+      lonMinDec: lonParts.minDec,
+      lonHem: lonParts.hem as "E" | "W",
+    };
   }
 
+  function applyProviderPosition(position: VesselPosition, okMessage = "BR1 GPS position applied") {
+    const lat = Number(position.latitude.toFixed(6));
+    const lon = Number(position.longitude.toFixed(6));
+    const label = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+    setManualPositionOverride(false);
+    setState((prev) => ({
+      ...prev,
+      pos: posFieldsFromDecimal(lat, lon),
+      coords: { lat, lon },
+      locLabel: label,
+    }));
+    void fetchWeather(lat, lon);
+    showToast(okMessage, true);
+  }
+
+  async function useVesselPosition() {
+    const position = await vesselPositionProvider.getLatestPosition();
+    setVesselPosition(position);
+    if (!position) {
+      showToast(gpsSourceUrl ? "No BR1 GPS fix available yet" : "Set GPS_SOURCE_URL for Northern Escape");
+      return;
+    }
+    applyProviderPosition(position, `${position.sourceStatus} position applied`);
+  }
   function fromPosFields() {
     const latDeg = Number(state.pos.latDeg);
     const latMin = Number(state.pos.latMin || 0);
@@ -1307,6 +1369,7 @@ export default function App() {
     }
 
     const label = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+    setManualPositionOverride(true);
     setState((prev) => ({
       ...prev,
       coords: { lat, lon },
@@ -1316,12 +1379,26 @@ export default function App() {
   }
 
   useEffect(() => {
-    const { lat, lon } = state.coords;
-    if (lat != null && lon != null) {
-      void fetchWeather(lat, lon);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId]);
+    if (!userId || !stateHydrated || stateLoadError) return;
+    return vesselPositionProvider.subscribe((position) => {
+      setVesselPosition(position);
+    });
+  }, [userId, stateHydrated, stateLoadError, vesselPositionProvider]);
+
+  useEffect(() => {
+    if (!userId || !stateHydrated || stateLoadError || !vesselPosition || manualPositionOverride) return;
+    const previous = weatherPositionRef.current;
+    const now = Date.now();
+    const moved =
+      !previous ||
+      Math.abs(previous.lat - vesselPosition.latitude) > 0.02 ||
+      Math.abs(previous.lon - vesselPosition.longitude) > 0.02;
+    const expired = !previous || now - previous.fetchedAt > WEATHER_REFRESH_MS;
+    if (!moved && !expired) return;
+
+    weatherPositionRef.current = { lat: vesselPosition.latitude, lon: vesselPosition.longitude, fetchedAt: now };
+    void fetchWeather(vesselPosition.latitude, vesselPosition.longitude);
+  }, [userId, stateHydrated, stateLoadError, vesselPosition, manualPositionOverride]);
 
   function composedPos(): string {
     const { latDeg, latMin, latMinDec, latHem, lonDeg, lonMin, lonMinDec, lonHem } = state.pos;
@@ -1748,7 +1825,7 @@ export default function App() {
           <div className="row">
             <div className="brand-mark"><div className="brand-title"><strong>BridgeLog Pro</strong><span>Vessel logbook</span></div></div>
             <div className="badge mono" title="Location label">
-              {state.locLabel}
+              {activeLocLabel}
             </div>
           </div>
 
@@ -1756,8 +1833,8 @@ export default function App() {
             <button className="btn" onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}>
               {theme === "dark" ? "Light" : "Dark"} mode
             </button>
-            <button className="btn" onClick={useGeo}>
-              Use my location
+            <button className="btn" onClick={() => void useVesselPosition()}>
+              Auto position
             </button>
             <button className="btn" onClick={fromPosFields}>
               From position fields
@@ -1789,7 +1866,7 @@ export default function App() {
           <div className="command-card"><span>Today</span><strong>{todaysLog.length}</strong><em>running entries</em></div>
           <div className="command-card"><span>Notes</span><strong>{todaysNotes.length}</strong><em>daily handover items</em></div>
           <div className="command-card"><span>Fuel Used</span><strong>{Math.round(todaysFuel.usedSum * 100) / 100} L</strong><em>computed from totals</em></div>
-          <div className="command-card"><span>Weather</span><strong>{wx.condition ?? "Unset"}</strong><em>{state.locLabel}</em></div>
+          <div className="command-card"><span>Weather</span><strong>{wx.condition ?? "Unset"}</strong><em>{activeLocLabel}</em></div>
         </div>
 
         <div className="grid grid-2">
@@ -1877,17 +1954,30 @@ export default function App() {
                 </div>
 
                 <div className="row" style={{ marginTop: 6 }}>
-                  <button className="btn" onClick={useGeo}>
-                    Use my location
+                  <button className="btn" onClick={() => void useVesselPosition()}>
+                    Auto position
                   </button>
                   <button className="btn" onClick={fromPosFields}>
                     From position fields
                   </button>
                   <span className="muted right">
-                    {state.coords.lat != null && state.coords.lon != null
-                      ? `For ${state.coords.lat.toFixed(4)}, ${state.coords.lon.toFixed(4)}`
-                      : "Set location"}
+                    {activeCoords.lat != null && activeCoords.lon != null
+                      ? `For ${activeCoords.lat.toFixed(4)}, ${activeCoords.lon.toFixed(4)}`
+                      : "Set GPS_SOURCE_URL or manual position"}
                   </span>
+                </div>
+
+                <div className="grid-3" style={{ marginTop: 8 }}>
+                  <input
+                    placeholder="GPS_SOURCE_URL"
+                    value={gpsSourceUrl}
+                    onChange={(e) => {
+                      setGpsSourceUrlValue(e.target.value);
+                      setConfiguredGpsSourceUrl(e.target.value);
+                    }}
+                  />
+                  <div className="badge">GPS source: <span className="right">{gpsStatus}</span></div>
+                  <div className="muted">{gpsTelemetry}</div>
                 </div>
 
                 <div className="weather-hero" style={{ marginTop: 8 }}>
@@ -2749,3 +2839,4 @@ export default function App() {
     </>
   );
 }
+
