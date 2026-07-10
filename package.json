@@ -5,9 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "gateway": "node gateway/bridgeLogGateway.mjs",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:gateway": "node gateway/nmeaParser.test.mjs",
+    "gateway:simulator": "powershell -ExecutionPolicy Bypass -File scripts/start-bridgeLogGateway-simulator.ps1"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.87.1",

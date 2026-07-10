@@ -1,0 +1,47 @@
+{
+  "vesselName": "Northern Escape",
+  "nmea": {
+    "host": "0.0.0.0",
+    "port": 10110
+  },
+  "http": {
+    "host": "0.0.0.0",
+    "port": 3100
+  },
+  "cors": {
+    "allowedOrigins": [
+      "http://localhost:3100",
+      "http://localhost:5187",
+      "http://127.0.0.1:5187"
+    ]
+  },
+  "staleTimeoutSeconds": 120,
+  "history": {
+    "intervalSeconds": 30,
+    "maxApiRows": 500
+  },
+  "logging": {
+    "directory": "gateway/logs",
+    "fileName": "gateway.log",
+    "maxBytes": 1048576,
+    "maxFiles": 5
+  },
+  "webApp": {
+    "serveDist": true,
+    "distPath": "dist"
+  },
+  "simulator": {
+    "enabled": false,
+    "intervalSeconds": 2,
+    "startLatitude": -17.772667,
+    "startLongitude": 177.38355,
+    "speedKnots": 8.4,
+    "courseDeg": 272,
+    "windSpeedKnots": 12,
+    "windAngleDeg": 45,
+    "depthMeters": 18,
+    "airTempC": 26,
+    "waterTempC": 27,
+    "barometerHpa": 1012
+  }
+}

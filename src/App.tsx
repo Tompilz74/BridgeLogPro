@@ -1,10 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
-import {
-  createTabletGpsPositionProvider,
-  createVesselPositionProvider,
-  type VesselPosition,
-} from "./services/VesselPositionProvider";
 
 /* =========================================================
    Supabase Config
@@ -18,14 +13,12 @@ const SUPABASE_ANON_KEY =
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const WEATHER_REFRESH_MS = 10 * 60_000;
-const BELUGA_LOGIN_EMAIL = "beluga@morrisnautical.com.au";
+const GATEWAY_URL_STORAGE_KEY = "blp-gateway-url";
 
 /* =========================================================
    Types
 ========================================================= */
 type Theme = "dark" | "light";
-type PositionSourceMode = "auto" | "tablet" | "network";
-
 type VesselDetails = {
   name?: string;
   callSign?: string;
@@ -98,9 +91,9 @@ type WeatherState = {
   waveDirDeg?: number | null;
 };
 
-type NmeaConnectionStatus = "waiting" | "connected" | "receiving" | "simulator" | "error";
+type GatewayConnectionStatus = "starting" | "waiting" | "connected" | "receiving" | "offline" | "error";
 
-type NmeaSnapshot = {
+type GatewayVesselState = {
   latitude: number | null;
   longitude: number | null;
   timestamp: string | null;
@@ -110,20 +103,43 @@ type NmeaSnapshot = {
   windAngleDeg: number | null;
   windSpeedKnots: number | null;
   windReference: "relative" | "true" | null;
+  windDirTrueDeg?: number | null;
   depthMeters: number | null;
+  airTempC?: number | null;
+  waterTempC?: number | null;
+  barometerHpa?: number | null;
+  humidityPct?: number | null;
   lastSentence: string | null;
+  lastSentenceType?: string | null;
   updatedAt: string | null;
 };
 
-type NmeaFeedState = {
-  status: NmeaConnectionStatus;
-  listenHost: string;
-  listenPort: number;
-  simulatorEnabled: boolean;
-  connectedClients: number;
-  sentenceCount: number;
+type BridgeLogGatewayState = {
+  gateway: {
+    name: string;
+    status: GatewayConnectionStatus;
+    nmeaListenHost: string;
+    nmeaListenPort: number;
+    httpHost: string;
+    httpPort: number;
+    startedAt?: string;
+    connectedClients: number;
+    sentenceCount: number;
+    lastError: string | null;
+  };
+  vessel: GatewayVesselState;
+  system?: {
+    hostname?: string;
+    platform?: string;
+    uptimeSeconds?: number;
+  };
+};
+
+type GatewayClientState = {
+  connected: boolean;
+  baseUrl: string | null;
   lastError: string | null;
-  snapshot: NmeaSnapshot;
+  state: BridgeLogGatewayState;
 };
 
 type HistoryDay = {
@@ -313,7 +329,7 @@ function parseNumberLoose(s: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function emptyNmeaSnapshot(): NmeaSnapshot {
+function emptyGatewayVesselState(): GatewayVesselState {
   return {
     latitude: null,
     longitude: null,
@@ -326,21 +342,50 @@ function emptyNmeaSnapshot(): NmeaSnapshot {
     windReference: null,
     depthMeters: null,
     lastSentence: null,
+    lastSentenceType: null,
     updatedAt: null,
   };
 }
 
-function defaultNmeaFeedState(): NmeaFeedState {
+function defaultGatewayState(): BridgeLogGatewayState {
   return {
-    status: "waiting",
-    listenHost: "0.0.0.0",
-    listenPort: 10110,
-    simulatorEnabled: false,
-    connectedClients: 0,
-    sentenceCount: 0,
-    lastError: null,
-    snapshot: emptyNmeaSnapshot(),
+    gateway: {
+      name: "BridgeLog Gateway",
+      status: "offline",
+      nmeaListenHost: "0.0.0.0",
+      nmeaListenPort: 10110,
+      httpHost: "0.0.0.0",
+      httpPort: 3100,
+      connectedClients: 0,
+      sentenceCount: 0,
+      lastError: null,
+    },
+    vessel: emptyGatewayVesselState(),
   };
+}
+
+function defaultGatewayClientState(): GatewayClientState {
+  return {
+    connected: false,
+    baseUrl: null,
+    lastError: null,
+    state: defaultGatewayState(),
+  };
+}
+
+function gatewayCandidates(): string[] {
+  if (typeof window === "undefined") return ["http://localhost:3100"];
+  const saved = localStorage.getItem(GATEWAY_URL_STORAGE_KEY)?.trim();
+  const configured = String(import.meta.env.VITE_BRIDGELOG_GATEWAY_URL ?? "").trim();
+  const host = window.location.hostname;
+  const protocol = window.location.protocol === "https:" ? "https:" : "http:";
+  return Array.from(
+    new Set(
+      [saved, configured, `${protocol}//${host}:3100`, "http://localhost:3100", "http://127.0.0.1:3100"].filter(
+        (value): value is string => Boolean(value)
+      )
+    )
+  );
 }
 
 function formatMaybe(value: number | null | undefined, suffix = "", digits = 1): string {
@@ -673,6 +718,7 @@ function GlobalStyles() {
       .track-line-under{fill:none;stroke:rgba(255,255,255,.84);stroke-width:8;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 2px 4px rgba(0,0,0,.28))}
       .track-line{fill:none;stroke:var(--accent);stroke-width:4;stroke-linecap:round;stroke-linejoin:round}
       .track-dot{fill:var(--btn-bg);stroke:var(--card);stroke-width:2.5}
+      .track-dot.auto{fill:color-mix(in srgb,var(--accent) 78%,#fff 22%);stroke:rgba(255,255,255,.85);stroke-width:1.5;opacity:.78}
       .track-dot.start{fill:#fff;stroke:var(--accent);stroke-width:3}
       .track-dot.latest{fill:var(--accent);stroke:#fff;stroke-width:3;filter:drop-shadow(0 2px 4px rgba(0,0,0,.28))}
       html[data-theme="dark"] .track-dot{fill:var(--btn-bg)}
@@ -697,30 +743,42 @@ function GlobalStyles() {
       .trip-meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--muted);font-size:12px}
       .trip-metrics{display:grid;grid-template-columns:repeat(2,minmax(80px,1fr));gap:8px;min-width:180px}
       .trip-metrics .metric{background:var(--card)}
-      .nmea-panel{grid-column:1 / -1;border:1px solid var(--card-border);background:var(--badge-bg);border-radius:10px;padding:10px;display:grid;gap:10px}
-      .nmea-head{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
-      .nmea-status{display:inline-flex;align-items:center;gap:7px;font-weight:800}
+      .entry-form{display:grid;gap:8px;margin-top:10px}
+      .entry-form .grid-4{gap:8px}
+      .nmea-panel{grid-column:1 / -1;border:1px solid var(--card-border);background:linear-gradient(135deg,var(--badge-bg),color-mix(in srgb,var(--card) 70%,transparent));border-radius:10px;padding:10px;display:grid;gap:10px}
+      .nmea-head{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap}
+      .nmea-status{display:inline-flex;align-items:center;gap:7px;font-weight:900;font-size:13px}
       .nmea-dot{width:10px;height:10px;border-radius:999px;background:#94a3b8;box-shadow:0 0 0 4px color-mix(in srgb,#94a3b8 18%,transparent)}
       .nmea-status.receiving .nmea-dot,.nmea-status.simulator .nmea-dot{background:#10b981;box-shadow:0 0 0 4px rgba(16,185,129,.18)}
       .nmea-status.connected .nmea-dot{background:#f59e0b;box-shadow:0 0 0 4px rgba(245,158,11,.18)}
       .nmea-status.error .nmea-dot{background:#ef4444;box-shadow:0 0 0 4px rgba(239,68,68,.18)}
-      .nmea-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px}
-      .nmea-value{border:1px solid var(--card-border);background:var(--card);border-radius:8px;padding:8px;min-height:58px}
-      .nmea-value span{display:block;color:var(--muted);font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.07em}
-      .nmea-value b{display:block;font-size:17px;margin-top:4px}
-      .nmea-footer{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
-      @media(max-width:1100px){.nmea-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
-      @media(max-width:620px){.nmea-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+      .nmea-grid{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:8px}
+      .nmea-value{border:1px solid var(--card-border);background:color-mix(in srgb,var(--card) 92%,transparent);border-radius:8px;padding:8px;min-height:58px;min-width:0}
+      .nmea-value.position{grid-column:span 2}
+      .nmea-value span{display:block;color:var(--muted);font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .nmea-value b{display:block;font-size:16px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .nmea-footer{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;border-top:1px solid var(--card-border);padding-top:8px}
+      @media(max-width:1100px){.nmea-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.nmea-value.position{grid-column:span 2}}
+      @media(max-width:620px){.nmea-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.nmea-value.position{grid-column:1 / -1}}
+      @media(min-width:700px) and (max-width:899px){.entry-card .grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}.entry-card .grid-3{grid-template-columns:repeat(3,minmax(0,1fr))}}
 
-      .pos-row{display:grid;grid-template-columns:minmax(82px,1fr) minmax(82px,1fr) minmax(112px,1.2fr) 76px;gap:10px;align-items:center}
+      .pos-row{display:grid;grid-template-columns:minmax(92px,1fr) minmax(92px,1fr) minmax(132px,1.25fr) 82px;gap:10px;align-items:center}
       .pos-row input,.pos-row select{width:100%;min-width:0}
       .entry-card .grid-4 > .pos-row{grid-column:1 / -1}
       .position-autofill{grid-column:1 / -1;display:grid;grid-template-columns:180px 1fr;gap:10px;align-items:center;border:1px solid var(--card-border);background:var(--badge-bg);border-radius:10px;padding:10px}
       .position-autofill .muted{line-height:1.35}
       @media(max-width:720px){.position-autofill{grid-template-columns:1fr}}
-      @media(max-width:720px){.pos-row{grid-template-columns:minmax(74px,1fr) minmax(74px,1fr) minmax(96px,1.2fr) 68px;gap:8px}}
+      @media(max-width:720px){.pos-row{grid-template-columns:minmax(82px,1fr) minmax(82px,1fr) minmax(108px,1.2fr) 72px;gap:8px}}
       @media(max-width:460px){.pos-row{grid-template-columns:1fr 1fr 76px}.pos-row input:nth-child(3){grid-column:1 / 3}}
 
+      @media (min-width: 700px) and (max-width: 1100px){
+        .container{padding:14px}
+        .section{padding:13px}
+        input,select,textarea{min-height:42px}
+        .btn{min-height:42px;padding:10px 12px}
+        .nmea-value{min-height:56px}
+        .position-autofill{grid-template-columns:170px 1fr}
+      }
       @media (max-width: 1100px){
         .tablet-hide{display:none !important;}
         th,td{padding:6px 6px;font-size:11px;}
@@ -836,6 +894,8 @@ type TrackPoint = {
   label: string;
   courseMagnetic?: string;
   remarks?: string;
+  source?: "log" | "auto";
+  sortKey?: number;
 };
 
 function parseLoggedPosition(position: string, time = ""): TrackPoint | null {
@@ -854,7 +914,7 @@ function parseLoggedPosition(position: string, time = ""): TrackPoint | null {
   const lat = (latDeg + latMin / 60) * (latHem === "S" ? -1 : 1);
   const lon = (lonDeg + lonMin / 60) * (lonHem === "W" ? -1 : 1);
 
-  return { lat, lon, time, label: position };
+  return { lat, lon, time, label: position, source: "log" };
 }
 
 function distanceNm(a: TrackPoint, b: TrackPoint): number {
@@ -885,16 +945,7 @@ function fmtDeg(value: number): string {
   return `${String(Math.round(value)).padStart(3, "0")}°`;
 }
 
-function buildTrack(entries: RunningEntry[]) {
-  const points = entries
-    .slice()
-    .reverse()
-    .map((entry) => {
-      const point = parseLoggedPosition(entry.position, entry.time);
-      return point ? { ...point, courseMagnetic: entry.courseMagnetic, remarks: entry.remarks } : null;
-    })
-    .filter((point): point is NonNullable<typeof point> => point != null);
-
+function buildTrackFromPoints(points: TrackPoint[]) {
   const legs = points.slice(1).map((point, idx) => {
     const from = points[idx];
     const distance = distanceNm(from, point);
@@ -908,6 +959,67 @@ function buildTrack(entries: RunningEntry[]) {
   return { points, legs, totalNm, lastLegNm };
 }
 
+function buildTrack(entries: RunningEntry[]) {
+  const points = entries
+    .slice()
+    .reverse()
+    .map((entry): TrackPoint | null => {
+      const point = parseLoggedPosition(entry.position, entry.time);
+      return point ? { ...point, courseMagnetic: entry.courseMagnetic, remarks: entry.remarks, source: "log" as const } : null;
+    })
+    .filter((point): point is NonNullable<typeof point> => point != null);
+
+  return buildTrackFromPoints(points);
+}
+
+function localDateKey(value?: string | null): string {
+  if (!value) return "";
+  const d = new Date(value);
+  if (!Number.isFinite(d.getTime())) return "";
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function buildGatewayTrack(history: BridgeLogGatewayState[], entries: RunningEntry[], dayISO: string) {
+  const autoPoints = history
+    .map((sample): TrackPoint | null => {
+      const vessel = sample.vessel;
+      const stamp = vessel.updatedAt ?? vessel.timestamp;
+      if (vessel.latitude == null || vessel.longitude == null || localDateKey(stamp) !== dayISO) return null;
+      return {
+        lat: vessel.latitude,
+        lon: vessel.longitude,
+        time: stamp ? new Date(stamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Auto",
+        label: "Auto fix",
+        courseMagnetic: vessel.courseDeg != null ? String(Math.round(vessel.courseDeg)) : undefined,
+        source: "auto" as const,
+        sortKey: stamp ? new Date(stamp).getTime() : 0,
+      };
+    })
+    .filter((point): point is TrackPoint => point != null)
+    .filter((point, idx, points) => {
+      const prev = points[idx - 1];
+      if (!prev) return true;
+      return distanceNm(prev, point) > 0.01 || Math.abs((point.sortKey ?? 0) - (prev.sortKey ?? 0)) > 10 * 60 * 1000;
+    });
+
+  const logPoints = entries
+    .map((entry): TrackPoint | null => {
+      const point = parseLoggedPosition(entry.position, entry.time);
+      if (!point) return null;
+      const [hh = "0", mm = "0"] = entry.time.split(":");
+      return {
+        ...point,
+        courseMagnetic: entry.courseMagnetic,
+        remarks: entry.remarks,
+        source: "log" as const,
+        sortKey: new Date(`${entry.date}T${hh.padStart(2, "0")}:${mm.padStart(2, "0")}:00`).getTime(),
+      };
+    })
+    .filter((point): point is TrackPoint => point != null);
+
+  const points = [...autoPoints, ...logPoints].sort((a, b) => (a.sortKey ?? 0) - (b.sortKey ?? 0));
+  return buildTrackFromPoints(points);
+}
 function fmtNm(value: number): string {
   return `${Math.round(value * 10) / 10} NM`;
 }
@@ -1001,7 +1113,7 @@ function TrackPlotView({ track, emptyText, compact = false, large = false }: { t
   }
   const pts = track.points.map((point) => {
     const px = worldPixel(point.lat, point.lon, zoom);
-    return { x: px.x - topLeft.x, y: px.y - topLeft.y, time: point.time, courseMagnetic: point.courseMagnetic };
+    return { x: px.x - topLeft.x, y: px.y - topLeft.y, time: point.time, courseMagnetic: point.courseMagnetic, source: point.source };
   });
   const linePoints = pts.map((p) => `${p.x},${p.y}`).join(" ");
   const className = large ? "track-map large" : compact ? "track-map compact" : "track-map";
@@ -1047,24 +1159,39 @@ function TrackPlotView({ track, emptyText, compact = false, large = false }: { t
             if (!a || !b) return null;
             const labelX = clampPlotLabel((a.x + b.x) / 2 + 6, 26, width - 96);
             const labelY = clampPlotLabel((a.y + b.y) / 2 + 12, 24, height - 18);
+            if (leg.to.source !== "log" && idx !== track.legs.length - 1) return null;
+            if (leg.to.source !== "log" && idx !== track.legs.length - 1) return null;
             return <text className="track-bearing-label" key={`${leg.from.time}-${leg.to.time}`} x={labelX} y={labelY} fontSize={large ? "11" : "10"}>{fmtDeg(leg.bearing)} / {fmtNm(leg.distance)}</text>;
           })}
           {pts.map((p, idx) => {
             const isStart = idx === 0;
             const isLatest = idx === pts.length - 1;
-            const label = isStart ? "Start" : isLatest ? "Latest" : p.time;
+            const isLog = p.source === "log";
+            const label = isStart ? "Start" : isLatest ? "Latest" : isLog ? p.time : "";
             const labelX = clampPlotLabel(p.x + 9, 14, width - 74);
             const labelY = clampPlotLabel(p.y - 10, 18, height - 26);
-            return <g key={`${p.time}-${idx}`}><circle className={`track-dot ${isStart ? "start" : ""} ${isLatest ? "latest" : ""}`} cx={p.x} cy={p.y} r={isLatest ? 6.5 : isStart ? 5.5 : 4} /><text className="track-label" x={labelX} y={labelY} fontSize={large ? "11" : "10"} fill="currentColor">{label} {isStart || isLatest ? p.time : ""}</text>{p.courseMagnetic ? <text className="track-label subtle" x={labelX} y={labelY + 13} fontSize="9">C {p.courseMagnetic}M</text> : null}</g>;
+            return <g key={`${p.time}-${idx}`}><circle className={`track-dot ${p.source === "auto" ? "auto" : ""} ${isStart ? "start" : ""} ${isLatest ? "latest" : ""}`} cx={p.x} cy={p.y} r={isLatest ? 6.5 : isStart ? 5.5 : p.source === "auto" ? 2.8 : 4.5} />{label ? <text className="track-label" x={labelX} y={labelY} fontSize={large ? "11" : "10"} fill="currentColor">{label} {isStart || isLatest ? p.time : ""}</text> : null}{p.courseMagnetic && (isLog || isLatest) ? <text className="track-label subtle" x={labelX} y={labelY + 13} fontSize="9">C {p.courseMagnetic}M</text> : null}</g>;
           })}
         </svg>
         <div className="map-attribution">OSM • z{zoom}</div>
       </div>
       <div className="track-stats"><div className="metric"><span>Total Track</span><b>{fmtNm(track.totalNm)}</b></div><div className="metric"><span>Last Leg</span><b>{fmtNm(track.lastLegNm)}</b></div><div className="metric"><span>Fixes</span><b>{track.points.length}</b></div></div>
-      <div className="course-leg-list" aria-label="Course legs">{track.legs.map((leg, idx) => <div className="course-leg" key={`${leg.from.time}-${leg.to.time}-${idx}`}><b>{fmtDeg(leg.bearing)}</b><span>{leg.from.time} - {leg.to.time}</span><span className="mono">{fmtNm(leg.distance)}</span></div>)}</div>
+      <div className="course-leg-list" aria-label="Course legs">{track.legs.slice(-8).map((leg, idx) => <div className="course-leg" key={`${leg.from.time}-${leg.to.time}-${idx}`}><b>{fmtDeg(leg.bearing)}</b><span>{leg.from.time} - {leg.to.time}</span><span className="mono">{fmtNm(leg.distance)}</span></div>)}</div>
     </>
   );
-}function windSummary(wx: WeatherState): string {
+}function beaufortFromKnots(knots?: number | null): string {
+  if (knots == null || !Number.isFinite(knots)) return "";
+  const thresholds = [1, 4, 7, 11, 17, 22, 28, 34, 41, 48, 56, 64];
+  const force = thresholds.findIndex((limit) => knots < limit);
+  return String(force === -1 ? 12 : force);
+}
+
+function formatLogNumber(value?: number | null, decimals = 1): string {
+  if (value == null || !Number.isFinite(value)) return "";
+  return Number(value.toFixed(decimals)).toString();
+}
+
+function windSummary(wx: WeatherState): string {
   if (wx.windKts == null) return "Set position for live wind";
   const gust = wx.windGustKts != null ? `, gust ${wx.windGustKts} kt` : "";
   return `${wx.windKts} kt @ ${wx.windDir ?? "--"}°${gust}`;
@@ -1083,7 +1210,6 @@ export default function App() {
 
   const [sessionReady, setSessionReady] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
-  const [userEmail, setUserEmail] = useState<string>("");
   const [stateHydrated, setStateHydrated] = useState(false);
   const [stateLoadError, setStateLoadError] = useState<string | null>(null);
 
@@ -1092,27 +1218,12 @@ export default function App() {
   const [loginStatus, setLoginStatus] = useState("Not logged in");
 
   const [state, setState] = useState<AppState>(() => defaultState());
-  const [mapOpen, setMapOpen] = useState(false);
-  const [vesselPosition, setVesselPosition] = useState<VesselPosition | null>(null);
-  const [manualPositionOverride, setManualPositionOverride] = useState(false);
-  const [nmeaFeed, setNmeaFeed] = useState<NmeaFeedState>(() => defaultNmeaFeedState());
+  const [mapOpen, setMapOpen] = useState(false);  const [gatewayClient, setGatewayClient] = useState<GatewayClientState>(() => defaultGatewayClientState());
+  const [gatewayHistory, setGatewayHistory] = useState<BridgeLogGatewayState[]>([]);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const remoteSaveArmed = useRef(false);
   const weatherPositionRef = useRef<{ lat: number; lon: number; fetchedAt: number } | null>(null);
-  const br1PositionProvider = useMemo(() => createVesselPositionProvider(), []);
-  const tabletGpsPositionProvider = useMemo(() => createTabletGpsPositionProvider(), []);
-  const [positionSourceMode, setPositionSourceMode] = useState<PositionSourceMode>(() => {
-    const saved = localStorage.getItem("blp-position-source");
-    return saved === "tablet" || saved === "network" ? saved : "auto";
-  });
-  const isBeluga =
-    userEmail.trim().toLowerCase() === BELUGA_LOGIN_EMAIL ||
-    loginEmail.trim().toLowerCase() === BELUGA_LOGIN_EMAIL;
-  const useTabletGps = positionSourceMode === "tablet" || (positionSourceMode === "auto" && isBeluga);
-  const vesselPositionProvider = useTabletGps ? tabletGpsPositionProvider : br1PositionProvider;
-  const autoPositionLabel = useTabletGps ? "Tablet GPS" : "Northern Escape GPS";
-  const autoPositionBackendLabel = useTabletGps ? "Tablet / Garmin GLO via device location" : "/api/vessel-position";
 
   function showToast(msg: string, ok = false) {
     setToast(ok ? `✓ ${msg}` : `BridgeLog Pro: ${msg}`);
@@ -1132,23 +1243,17 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
-    localStorage.setItem("blp-position-source", positionSourceMode);
-  }, [positionSourceMode]);
-
-  useEffect(() => {
     let mounted = true;
     (async () => {
       const { data } = await supabase.auth.getSession();
       if (!mounted) return;
       const uid = data.session?.user?.id ?? null;
       setUserId(uid);
-      setUserEmail(data.session?.user?.email ?? "");
       setSessionReady(true);
     })();
 
     const { data: sub } = supabase.auth.onAuthStateChange((_event, sess) => {
       setUserId(sess?.user?.id ?? null);
-      setUserEmail(sess?.user?.email ?? "");
     });
 
     return () => {
@@ -1302,38 +1407,37 @@ export default function App() {
     return computeFuelForDay(todaysLog, prevFuel);
   }, [todaysLog, state.history, state.daily.date]);
 
-  const todaysTrack = useMemo(() => buildTrack(todaysLog), [todaysLog]);
-  const activeCoords = vesselPosition && !manualPositionOverride
-    ? { lat: vesselPosition.latitude, lon: vesselPosition.longitude }
-    : state.coords;
-  const activeLocLabel = vesselPosition && !manualPositionOverride
-    ? `${vesselPosition.latitude.toFixed(4)}, ${vesselPosition.longitude.toFixed(4)}`
-    : state.locLabel;
-  const gpsStatus = vesselPosition?.sourceStatus ?? (useTabletGps ? "Tablet GPS Stale" : "BR1 GPS Stale");
-  const gpsTelemetry = vesselPosition
-    ? [
-        vesselPosition.speedKts != null ? `${vesselPosition.speedKts} kt` : null,
-        vesselPosition.headingDeg != null ? `${Math.round(vesselPosition.headingDeg)}°` : null,
-        vesselPosition.accuracyM != null ? `±${Math.round(vesselPosition.accuracyM)} m` : null,
-        vesselPosition.altitudeM != null ? `Alt ${Math.round(vesselPosition.altitudeM)} m` : null,
-        vesselPosition.timestamp ? new Date(vesselPosition.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : null,
-      ]
-        .filter(Boolean)
-        .join(" • ")
-    : `Waiting for ${autoPositionLabel}`;
-  const nmea = nmeaFeed.snapshot;
-  const nmeaStatusLabel =
-    nmeaFeed.status === "receiving"
+  const todaysTrack = useMemo(() => buildGatewayTrack(gatewayHistory, todaysLog, state.daily.date), [gatewayHistory, todaysLog, state.daily.date]);
+  const gateway = gatewayClient.state.gateway;
+  const gatewayVessel = gatewayClient.state.vessel;
+  const gatewayStatusLabel =
+    !gatewayClient.connected
+      ? "Offline"
+      : gateway.status === "receiving"
       ? "Receiving"
-      : nmeaFeed.status === "connected"
+      : gateway.status === "connected"
       ? "Connected"
-      : nmeaFeed.status === "simulator"
-      ? "Simulator"
-      : nmeaFeed.status === "error"
+      : gateway.status === "error"
       ? "Error"
       : "Waiting";
-  const nmeaEndpoint = `${nmeaFeed.listenHost === "0.0.0.0" ? "BridgeLog PC IP" : nmeaFeed.listenHost}:${nmeaFeed.listenPort}`;
-
+  const gatewayNmeaEndpoint = `${gateway.nmeaListenHost === "0.0.0.0" ? "BridgeLog Gateway PC IP" : gateway.nmeaListenHost}:${gateway.nmeaListenPort}`;
+  const nmeaHasPosition = gatewayVessel.latitude != null && gatewayVessel.longitude != null;
+  const activeCoords = nmeaHasPosition
+    ? { lat: gatewayVessel.latitude as number, lon: gatewayVessel.longitude as number }
+    : state.coords;
+  const activeLocLabel = nmeaHasPosition
+    ? `${(gatewayVessel.latitude as number).toFixed(4)}, ${(gatewayVessel.longitude as number).toFixed(4)}`
+    : state.locLabel;
+  const nmeaTelemetry = [
+    gatewayVessel.speedKnots != null ? `${gatewayVessel.speedKnots.toFixed(1)} kt` : null,
+    gatewayVessel.courseDeg != null ? `COG ${Math.round(gatewayVessel.courseDeg)}°` : null,
+    gatewayVessel.headingDeg != null ? `HDG ${Math.round(gatewayVessel.headingDeg)}°` : null,
+    gatewayVessel.windDirTrueDeg != null ? `Wind ${Math.round(gatewayVessel.windDirTrueDeg)}°` : null,
+    gatewayVessel.windSpeedKnots != null ? `${gatewayVessel.windSpeedKnots.toFixed(1)} kt` : null,
+    gatewayVessel.barometerHpa != null ? `${Math.round(gatewayVessel.barometerHpa)} hPa` : null,
+    gatewayVessel.depthMeters != null ? `Depth ${gatewayVessel.depthMeters.toFixed(1)} m` : null,
+    gatewayVessel.updatedAt ? new Date(gatewayVessel.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : null,
+  ].filter(Boolean).join(" • ");
   async function fetchWeather(lat: number, lon: number) {
     try {
       const u = new URL("https://api.open-meteo.com/v1/forecast");
@@ -1431,11 +1535,10 @@ export default function App() {
     };
   }
 
-  function applyDecimalPosition(latInput: number, lonInput: number, okMessage = "Auto position applied") {
+  function applyDecimalPosition(latInput: number, lonInput: number, okMessage = "Position applied") {
     const lat = Number(latInput.toFixed(6));
     const lon = Number(lonInput.toFixed(6));
     const label = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
-    setManualPositionOverride(false);
     setState((prev) => ({
       ...prev,
       pos: posFieldsFromDecimal(lat, lon),
@@ -1446,65 +1549,41 @@ export default function App() {
     showToast(okMessage, true);
   }
 
-  function applyProviderPosition(position: VesselPosition, okMessage = "Auto position applied") {
-    applyDecimalPosition(position.latitude, position.longitude, okMessage);
-    setEntryFields((prev) => ({
-      ...prev,
-      courseMagnetic: position.headingDeg != null ? String(Math.round(position.headingDeg)) : prev.courseMagnetic,
-      courseGyro: position.headingDeg != null ? String(Math.round(position.headingDeg)) : prev.courseGyro,
-      courseSteering: position.headingDeg != null ? String(Math.round(position.headingDeg)) : prev.courseSteering,
-      speed: position.speedKts != null ? position.speedKts.toFixed(1) : prev.speed,
-    }));
-  }
-
-  async function useVesselPosition() {
-    const position = await vesselPositionProvider.getLatestPosition();
-    setVesselPosition(position);
-    if (position) {
-      applyProviderPosition(position, `${position.sourceStatus} position applied`);
-      return;
-    }
-
-    if (vesselPosition) {
-      applyProviderPosition(vesselPosition, `${vesselPosition.sourceStatus} cached position applied`);
-      return;
-    }
-
-    if (activeCoords.lat != null && activeCoords.lon != null) {
-      applyDecimalPosition(activeCoords.lat, activeCoords.lon, "Displayed position applied");
-      return;
-    }
-
-    showToast(`No vessel position from ${autoPositionLabel} yet`);
-  }
-
-  function autoFillFromNmea() {
-    const hasPosition = nmea.latitude != null && nmea.longitude != null;
+  function autoFillFromGateway() {
+    const hasPosition = gatewayVessel.latitude != null && gatewayVessel.longitude != null;
     if (hasPosition) {
-      applyDecimalPosition(nmea.latitude as number, nmea.longitude as number, "NMEA position applied");
+      applyDecimalPosition(gatewayVessel.latitude as number, gatewayVessel.longitude as number, "Gateway position applied");
     }
 
     setEntryFields((prev) => ({
       ...prev,
-      courseMagnetic: nmea.courseDeg != null ? String(Math.round(nmea.courseDeg)) : prev.courseMagnetic,
-      courseGyro: nmea.headingDeg != null ? String(Math.round(nmea.headingDeg)) : prev.courseGyro,
-      courseSteering: nmea.headingDeg != null ? String(Math.round(nmea.headingDeg)) : prev.courseSteering,
-      speed: nmea.speedKnots != null ? nmea.speedKnots.toFixed(1) : prev.speed,
-      windDir: nmea.windAngleDeg != null ? String(Math.round(nmea.windAngleDeg)) : prev.windDir,
+      courseMagnetic: gatewayVessel.courseDeg != null ? String(Math.round(gatewayVessel.courseDeg)) : prev.courseMagnetic,
+      courseGyro: gatewayVessel.headingDeg != null ? String(Math.round(gatewayVessel.headingDeg)) : prev.courseGyro,
+      courseSteering: gatewayVessel.headingDeg != null ? String(Math.round(gatewayVessel.headingDeg)) : prev.courseSteering,
+      speed: gatewayVessel.speedKnots != null ? gatewayVessel.speedKnots.toFixed(1) : prev.speed,
+      windDir:
+        gatewayVessel.windDirTrueDeg != null
+          ? String(Math.round(gatewayVessel.windDirTrueDeg))
+          : gatewayVessel.windReference === "true" && gatewayVessel.windAngleDeg != null
+          ? String(Math.round(gatewayVessel.windAngleDeg))
+          : prev.windDir,
+      windForce: gatewayVessel.windSpeedKnots != null ? beaufortFromKnots(gatewayVessel.windSpeedKnots) : prev.windForce,
+      barometer: gatewayVessel.barometerHpa != null ? formatLogNumber(gatewayVessel.barometerHpa, 0) : prev.barometer,
+      airTemp: gatewayVessel.airTempC != null ? formatLogNumber(gatewayVessel.airTempC, 1) : prev.airTemp,
+      seaTemp: gatewayVessel.waterTempC != null ? formatLogNumber(gatewayVessel.waterTempC, 1) : prev.seaTemp,
       remarks:
-        nmea.depthMeters != null
-          ? `${prev.remarks ? `${prev.remarks} • ` : ""}Depth ${nmea.depthMeters.toFixed(1)} m`
+        gatewayVessel.depthMeters != null
+          ? `${prev.remarks ? `${prev.remarks} - ` : ""}Depth ${gatewayVessel.depthMeters.toFixed(1)} m`
           : prev.remarks,
     }));
 
-    if (!hasPosition && nmea.speedKnots == null && nmea.courseDeg == null && nmea.headingDeg == null) {
-      showToast("No live NMEA navigation data yet");
+    if (!hasPosition && gatewayVessel.speedKnots == null && gatewayVessel.courseDeg == null && gatewayVessel.headingDeg == null && gatewayVessel.windSpeedKnots == null && gatewayVessel.airTempC == null && gatewayVessel.waterTempC == null && gatewayVessel.barometerHpa == null) {
+      showToast("No live BridgeLog Gateway data yet");
       return;
     }
 
-    showToast("NMEA bridge log fields filled", true);
+    showToast("BridgeLog Gateway fields filled", true);
   }
-
   function fromPosFields() {
     const latDeg = Number(state.pos.latDeg);
     const latMin = Number(state.pos.latMin || 0);
@@ -1529,7 +1608,6 @@ export default function App() {
     }
 
     const label = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
-    setManualPositionOverride(true);
     setState((prev) => ({
       ...prev,
       coords: { lat, lon },
@@ -1540,63 +1618,99 @@ export default function App() {
 
   useEffect(() => {
     if (!userId || !stateHydrated || stateLoadError) return;
-    return vesselPositionProvider.subscribe((position) => {
-      setVesselPosition(position);
-    });
-  }, [userId, stateHydrated, stateLoadError, vesselPositionProvider]);
-
-  useEffect(() => {
-    if (!userId || !stateHydrated || stateLoadError) return;
 
     let stopped = false;
-    const loadInitial = async () => {
-      try {
-        const response = await fetch("/api/nmea/state", { cache: "no-store" });
-        if (!response.ok) return;
-        const feed = (await response.json()) as NmeaFeedState;
-        if (!stopped) setNmeaFeed(feed);
-      } catch {
-        if (!stopped) {
-          setNmeaFeed((prev) => ({ ...prev, status: "waiting", lastError: "NMEA backend not available" }));
+    let events: EventSource | null = null;
+
+    const connectGateway = async () => {
+      for (const baseUrl of gatewayCandidates()) {
+        try {
+          const response = await fetch(`${baseUrl}/api/v1/state`, { cache: "no-store" });
+          if (!response.ok) continue;
+          const state = (await response.json()) as BridgeLogGatewayState;
+          if (stopped) return;
+          localStorage.setItem(GATEWAY_URL_STORAGE_KEY, baseUrl);
+          setGatewayClient({ connected: true, baseUrl, lastError: null, state });
+
+          events = new EventSource(`${baseUrl}/api/v1/events`);
+          events.addEventListener("gateway-state", (event) => {
+            try {
+              setGatewayClient((prev) => ({
+                ...prev,
+                connected: true,
+                baseUrl,
+                lastError: null,
+                state: JSON.parse((event as MessageEvent).data) as BridgeLogGatewayState,
+              }));
+            } catch {
+              // Keep the previous good gateway state visible.
+            }
+          });
+          events.onerror = () => {
+            setGatewayClient((prev) => ({ ...prev, connected: false, lastError: "BridgeLog Gateway event stream interrupted" }));
+          };
+          return;
+        } catch {
+          // Try the next candidate gateway address.
         }
       }
-    };
 
-    void loadInitial();
-
-    const events = new EventSource("/api/nmea/events");
-    events.addEventListener("nmea-state", (event) => {
-      try {
-        setNmeaFeed(JSON.parse((event as MessageEvent).data) as NmeaFeedState);
-      } catch {
-        // Ignore malformed event payloads and keep the previous snapshot visible.
+      if (!stopped) {
+        setGatewayClient((prev) => ({
+          ...prev,
+          connected: false,
+          lastError: "BridgeLog Gateway offline",
+          state: { ...prev.state, gateway: { ...prev.state.gateway, status: "offline" } },
+        }));
       }
-    });
-    events.onerror = () => {
-      setNmeaFeed((prev) => ({ ...prev, status: prev.status === "receiving" ? "connected" : prev.status, lastError: "NMEA event stream interrupted" }));
     };
+
+    void connectGateway();
+    const reconnectTimer = window.setInterval(() => {
+      if (!events || events.readyState === EventSource.CLOSED) void connectGateway();
+    }, 15_000);
 
     return () => {
       stopped = true;
-      events.close();
+      window.clearInterval(reconnectTimer);
+      events?.close();
     };
   }, [userId, stateHydrated, stateLoadError]);
+  useEffect(() => {
+    if (!userId || !stateHydrated || stateLoadError || !gatewayClient.baseUrl) return;
+    let stopped = false;
+    const loadGatewayHistory = async () => {
+      try {
+        const response = await fetch(`${gatewayClient.baseUrl}/api/v1/history`, { cache: "no-store" });
+        if (!response.ok) return;
+        const history = (await response.json()) as BridgeLogGatewayState[];
+        if (!stopped) setGatewayHistory(history);
+      } catch {
+        // The app can still use manual logs and live state if history is unavailable.
+      }
+    };
+
+    void loadGatewayHistory();
+    const timer = window.setInterval(loadGatewayHistory, 30_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [userId, stateHydrated, stateLoadError, gatewayClient.baseUrl]);
 
   useEffect(() => {
-    if (!userId || !stateHydrated || stateLoadError || !vesselPosition || manualPositionOverride) return;
+    if (!userId || !stateHydrated || stateLoadError || !nmeaHasPosition) return;
+    const lat = gatewayVessel.latitude as number;
+    const lon = gatewayVessel.longitude as number;
     const previous = weatherPositionRef.current;
     const now = Date.now();
-    const moved =
-      !previous ||
-      Math.abs(previous.lat - vesselPosition.latitude) > 0.02 ||
-      Math.abs(previous.lon - vesselPosition.longitude) > 0.02;
+    const moved = !previous || Math.abs(previous.lat - lat) > 0.02 || Math.abs(previous.lon - lon) > 0.02;
     const expired = !previous || now - previous.fetchedAt > WEATHER_REFRESH_MS;
     if (!moved && !expired) return;
 
-    weatherPositionRef.current = { lat: vesselPosition.latitude, lon: vesselPosition.longitude, fetchedAt: now };
-    void fetchWeather(vesselPosition.latitude, vesselPosition.longitude);
-  }, [userId, stateHydrated, stateLoadError, vesselPosition, manualPositionOverride]);
-
+    weatherPositionRef.current = { lat, lon, fetchedAt: now };
+    void fetchWeather(lat, lon);
+  }, [userId, stateHydrated, stateLoadError, nmeaHasPosition, gatewayVessel.latitude, gatewayVessel.longitude]);
   function composedPos(): string {
     const { latDeg, latMin, latMinDec, latHem, lonDeg, lonMin, lonMinDec, lonHem } = state.pos;
     const latDec = String(latMinDec ?? "").padStart(3, "0");
@@ -1682,7 +1796,12 @@ export default function App() {
   }
 
   function addMovement(kind: "Along" | "Cast Off" | "Anchor Down" | "Anchor Up") {
-    const p = composedPos() || (todaysLog[0]?.position ?? "(pos TBD)");
+    const livePosition = gatewayVessel.latitude != null && gatewayVessel.longitude != null;
+    const livePosFields = livePosition ? posFieldsFromDecimal(gatewayVessel.latitude as number, gatewayVessel.longitude as number) : null;
+    const livePositionLabel = livePosFields
+      ? `${livePosFields.latDeg}°${livePosFields.latMin}.${livePosFields.latMinDec}'${livePosFields.latHem} / ${livePosFields.lonDeg}°${livePosFields.lonMin}.${livePosFields.lonMinDec}'${livePosFields.lonHem}`
+      : "";
+    const p = livePositionLabel || composedPos() || (todaysLog[0]?.position ?? "(pos TBD)");
     const text = `${kind} at ${p}`;
 
     setState((prev) => {
@@ -1693,21 +1812,21 @@ export default function App() {
           date: prev.daily.date,
           time: nowHHMM(),
           position: p,
-          courseMagnetic: "",
-          courseGyro: "",
-          courseSteering: "",
-          speed: "",
-          windDir: "",
-          windForce: "",
+          courseMagnetic: gatewayVessel.courseDeg != null ? String(Math.round(gatewayVessel.courseDeg)) : "",
+          courseGyro: gatewayVessel.headingDeg != null ? String(Math.round(gatewayVessel.headingDeg)) : "",
+          courseSteering: gatewayVessel.headingDeg != null ? String(Math.round(gatewayVessel.headingDeg)) : "",
+          speed: gatewayVessel.speedKnots != null ? gatewayVessel.speedKnots.toFixed(1) : "",
+          windDir: gatewayVessel.windDirTrueDeg != null ? String(Math.round(gatewayVessel.windDirTrueDeg)) : "",
+          windForce: gatewayVessel.windSpeedKnots != null ? beaufortFromKnots(gatewayVessel.windSpeedKnots) : "",
           sea: "",
           sky: "",
           visibility: "",
-          barometer: "",
-          airTemp: "",
-          seaTemp: "",
+          barometer: gatewayVessel.barometerHpa != null ? formatLogNumber(gatewayVessel.barometerHpa, 0) : "",
+          airTemp: gatewayVessel.airTempC != null ? formatLogNumber(gatewayVessel.airTempC, 1) : "",
+          seaTemp: gatewayVessel.waterTempC != null ? formatLogNumber(gatewayVessel.waterTempC, 1) : "",
           engines: "",
           watchkeeper: prev.watchkeeper || "",
-          remarks: text,
+          remarks: gatewayVessel.depthMeters != null ? `${text} - Depth ${gatewayVessel.depthMeters.toFixed(1)} m` : text,
           totalFuel: "",
         },
         ...prev.log,
@@ -1722,13 +1841,19 @@ export default function App() {
 
       return {
         ...prev,
+        ...(livePosFields && livePosition
+          ? {
+              pos: livePosFields,
+              coords: { lat: gatewayVessel.latitude as number, lon: gatewayVessel.longitude as number },
+              locLabel: `${(gatewayVessel.latitude as number).toFixed(4)}, ${(gatewayVessel.longitude as number).toFixed(4)}`,
+            }
+          : {}),
         notes: nextNotes,
         log: nextLog,
         daily: { ...prev.daily, mode: nextMode },
       };
     });
   }
-
   function saveDayToHistory() {
     setState((prev) => {
       const todays = prev.log.filter((e) => e.date === prev.daily.date);
@@ -2030,9 +2155,6 @@ export default function App() {
             <button className="btn" onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}>
               {theme === "dark" ? "Light" : "Dark"} mode
             </button>
-            <button className="btn" onClick={() => void useVesselPosition()}>
-              Auto position
-            </button>
             <button className="btn" onClick={fromPosFields}>
               From position fields
             </button>
@@ -2151,35 +2273,21 @@ export default function App() {
                 </div>
 
                 <div className="row" style={{ marginTop: 6 }}>
-                  <select
-                    value={positionSourceMode}
-                    onChange={(e) => setPositionSourceMode(e.target.value as PositionSourceMode)}
-                    style={{ maxWidth: 260 }}
-                    title="Auto position source"
-                  >
-                    <option value="auto">Auto source</option>
-                    <option value="tablet">Tablet GPS</option>
-                    <option value="network">Vessel network GPS</option>
-                  </select>
-                  <button className="btn" onClick={() => void useVesselPosition()}>
-                    Auto position
-                  </button>
                   <button className="btn" onClick={fromPosFields}>
                     From position fields
                   </button>
                   <span className="muted right">
                     {activeCoords.lat != null && activeCoords.lon != null
-                      ? `For ${activeCoords.lat.toFixed(4)}, ${activeCoords.lon.toFixed(4)}`
-                      : "Use auto position or manual entry"}
+                      ? `NMEA position ${activeCoords.lat.toFixed(4)}, ${activeCoords.lon.toFixed(4)}`
+                      : "Waiting for Gateway NMEA or manual entry"}
                   </span>
                 </div>
 
                 <div className="grid-3" style={{ marginTop: 8 }}>
-                  <div className="badge">GPS source: <span className="right">{gpsStatus}</span></div>
-                  <div className="muted">Auto source: <span className="mono">{autoPositionBackendLabel}</span></div>
-                  <div className="muted">{gpsTelemetry}</div>
+                  <div className="badge">NMEA source: <span className="right">BridgeLog Gateway {gatewayStatusLabel}</span></div>
+                  <div className="muted">Endpoint: <span className="mono">{gatewayNmeaEndpoint}</span></div>
+                  <div className="muted">{nmeaTelemetry || "Waiting for NMEA vessel data"}</div>
                 </div>
-
                 <div className="weather-hero" style={{ marginTop: 8 }}>
                   <div className="weather-icon">{wxIcon(wx.weatherCode)}</div>
                   <div>
@@ -2277,59 +2385,62 @@ export default function App() {
 
                 <div className="nmea-panel">
                   <div className="nmea-head">
-                    <div className={`nmea-status ${nmeaFeed.status}`}>
+                    <div className={`nmea-status ${gatewayClient.connected ? gateway.status : "error"}`}>
                       <span className="nmea-dot" />
-                      NMEA TCP {nmeaStatusLabel}
+                      BridgeLog Gateway {gatewayStatusLabel}
                     </div>
                     <div className="muted">
-                      Send to <span className="mono">{nmeaEndpoint}</span> • {nmeaFeed.connectedClients} client
-                      {nmeaFeed.connectedClients === 1 ? "" : "s"} • {nmeaFeed.sentenceCount} sentences
+                      NMEA to <span className="mono">{gatewayNmeaEndpoint}</span> • {gateway.connectedClients} client
+                      {gateway.connectedClients === 1 ? "" : "s"} • {gateway.sentenceCount} sentences
                     </div>
                   </div>
 
                   <div className="nmea-grid">
-                    <div className="nmea-value">
+                    <div className="nmea-value position">
                       <span>Position</span>
                       <b>
-                        {nmea.latitude != null && nmea.longitude != null
-                          ? `${nmea.latitude.toFixed(5)}, ${nmea.longitude.toFixed(5)}`
+                        {gatewayVessel.latitude != null && gatewayVessel.longitude != null
+                          ? `${gatewayVessel.latitude.toFixed(5)}, ${gatewayVessel.longitude.toFixed(5)}`
                           : "--"}
                       </b>
                     </div>
                     <div className="nmea-value">
                       <span>SOG</span>
-                      <b>{formatMaybe(nmea.speedKnots, " kt")}</b>
+                      <b>{formatMaybe(gatewayVessel.speedKnots, " kt")}</b>
                     </div>
                     <div className="nmea-value">
                       <span>COG</span>
-                      <b>{formatMaybe(nmea.courseDeg, "°", 0)}</b>
+                      <b>{formatMaybe(gatewayVessel.courseDeg, "°", 0)}</b>
                     </div>
                     <div className="nmea-value">
                       <span>Heading</span>
-                      <b>{formatMaybe(nmea.headingDeg, "°", 0)}</b>
+                      <b>{formatMaybe(gatewayVessel.headingDeg, "°", 0)}</b>
                     </div>
                     <div className="nmea-value">
-                      <span>Wind</span>
-                      <b>
-                        {nmea.windAngleDeg != null || nmea.windSpeedKnots != null
-                          ? `${formatMaybe(nmea.windAngleDeg, "°", 0)} / ${formatMaybe(nmea.windSpeedKnots, " kt")}`
-                          : "--"}
-                      </b>
+                      <span>Wind Dir</span>
+                      <b>{gatewayVessel.windDirTrueDeg != null ? formatMaybe(gatewayVessel.windDirTrueDeg, "°T", 0) : gatewayVessel.windAngleDeg != null ? `${formatMaybe(gatewayVessel.windAngleDeg, "°", 0)} ${gatewayVessel.windReference === "relative" ? "rel" : ""}` : "--"}</b>
+                    </div>
+                    <div className="nmea-value">
+                      <span>Wind Spd</span>
+                      <b>{formatMaybe(gatewayVessel.windSpeedKnots, " kt")}</b>
+                    </div>
+                    <div className="nmea-value">
+                      <span>Barometer</span>
+                      <b>{formatMaybe(gatewayVessel.barometerHpa, " hPa", 0)}</b>
                     </div>
                     <div className="nmea-value">
                       <span>Depth</span>
-                      <b>{formatMaybe(nmea.depthMeters, " m")}</b>
+                      <b>{formatMaybe(gatewayVessel.depthMeters, " m")}</b>
                     </div>
                   </div>
-
                   <div className="nmea-footer">
-                    <button className="btn" type="button" onClick={autoFillFromNmea}>
+                    <button className="btn" type="button" onClick={autoFillFromGateway}>
                       Auto-fill Bridge Log
                     </button>
                     <span className="muted">
-                      {nmea.updatedAt
-                        ? `Latest ${new Date(nmea.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`
-                        : nmeaFeed.lastError || "Waiting for GGA/RMC/VTG/HDT/HDG/MWV/DBT/DPT"}
+                      {gatewayVessel.updatedAt
+                        ? `Latest ${new Date(gatewayVessel.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`
+                        : gatewayClient.lastError || gateway.lastError || "Waiting for BridgeLog Gateway live data"}
                     </span>
                   </div>
                 </div>
@@ -2345,19 +2456,20 @@ export default function App() {
                   <div className="muted">Position</div>
 
                   <div className="position-autofill">
-                    <button className="btn" onClick={() => void useVesselPosition()}>
-                      Auto-fill position
+                    <button className="btn" onClick={autoFillFromGateway}>
+                      Fill from NMEA
                     </button>
                     <div>
                       <div>
-                        <b>{gpsStatus}</b>
-                        <span className="muted"> • {activeCoords.lat != null && activeCoords.lon != null ? `${activeCoords.lat.toFixed(5)}, ${activeCoords.lon.toFixed(5)}` : "No position yet"}</span>
+                        <b>BridgeLog Gateway {gatewayStatusLabel}</b>
+                        <span className="muted"> • {activeCoords.lat != null && activeCoords.lon != null ? `${activeCoords.lat.toFixed(5)}, ${activeCoords.lon.toFixed(5)}` : "No NMEA position yet"}</span>
                       </div>
                       <div className="muted">
-                        {gpsTelemetry || `Waiting for ${autoPositionLabel}`} • Manual lat/long below remains editable.
+                        {nmeaTelemetry || "Waiting for Gateway NMEA"} • Manual lat/long below remains editable.
                       </div>
                     </div>
                   </div>
+
                   <div className="pos-row">
                     <input
                       className="mono"
@@ -3112,4 +3224,5 @@ export default function App() {
     </>
   );
 }
+
 

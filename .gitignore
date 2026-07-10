@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# BridgeLog Gateway runtime
+gateway/data/
+gateway/logs/
