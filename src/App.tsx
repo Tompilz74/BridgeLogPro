@@ -16,6 +16,8 @@ const WEATHER_REFRESH_MS = 10 * 60_000;
 const GATEWAY_URL_STORAGE_KEY = "blp-gateway-url";
 const BELUGA_LOGIN_EMAIL = "beluga@morrisnautical.com.au";
 const NORTHERN_ESCAPE_LOGIN_HINT = "northernescape";
+const AUTO_TRACK_INTERVAL_MS = 10 * 60_000;
+const MOVING_SPEED_KTS = 1.5;
 
 /* =========================================================
    Types
@@ -49,6 +51,17 @@ type DailyState = {
 };
 
 type Note = { date: string; time: string; text: string };
+
+type AutoTrackFix = {
+  date: string;
+  time: string;
+  lat: number;
+  lon: number;
+  recordedAtISO: string;
+  courseDeg?: number | null;
+  speedKnots?: number | null;
+  source: "tablet-gps";
+};
 
 type RunningEntry = {
   date: string;
@@ -152,6 +165,7 @@ type HistoryDay = {
   notes: Note[];
   weather: WeatherState;
   runningLog: RunningEntry[];
+  autoTrack?: AutoTrackFix[];
   fuelSummary?: {
     usedLitres?: number;
     lastTotalFuel?: number | null;
@@ -163,6 +177,7 @@ type AppState = {
   watchkeeper: string;
   notes: Note[];
   log: RunningEntry[];
+  autoTrack: AutoTrackFix[];
   history: HistoryDay[];
   pos: PosState;
   daily: DailyState;
@@ -411,6 +426,7 @@ function normalizeBackupToState(obj: unknown): AppState | null {
   const vessel = s.vessel && typeof s.vessel === "object" ? (s.vessel as VesselDetails) : {};
   const notes = Array.isArray(s.notes) ? (s.notes as Note[]) : [];
   const log = Array.isArray(s.log) ? (s.log as any[]) : [];
+  const autoTrack = Array.isArray(s.autoTrack) ? (s.autoTrack as any[]) : [];
   const history = Array.isArray(s.history) ? (s.history as any[]) : [];
 
   const pos = s.pos && typeof s.pos === "object" ? (s.pos as PosState) : fallback.pos;
@@ -460,6 +476,22 @@ function normalizeBackupToState(obj: unknown): AppState | null {
       };
     });
 
+  const normalizeAutoTrack = (items: any[]): AutoTrackFix[] =>
+    items
+      .filter((f) => f && typeof f === "object")
+      .map((f: any) => ({
+        date: String(f.date ?? localDateKey(f.recordedAtISO) ?? todayISO()),
+        time: String(f.time ?? (f.recordedAtISO ? new Date(f.recordedAtISO).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "")),
+        lat: Number(f.lat),
+        lon: Number(f.lon),
+        recordedAtISO: String(f.recordedAtISO ?? new Date().toISOString()),
+        courseDeg: typeof f.courseDeg === "number" && Number.isFinite(f.courseDeg) ? f.courseDeg : null,
+        speedKnots: typeof f.speedKnots === "number" && Number.isFinite(f.speedKnots) ? f.speedKnots : null,
+        source: "tablet-gps" as const,
+      }))
+      .filter((f) => Number.isFinite(f.lat) && Number.isFinite(f.lon));
+
+  const normalizedAutoTrack = normalizeAutoTrack(autoTrack);
   const normalizedHistory: HistoryDay[] = history
     .filter((h) => h && typeof h === "object" && typeof (h as any).date === "string")
     .map((h: any) => ({
@@ -469,6 +501,7 @@ function normalizeBackupToState(obj: unknown): AppState | null {
       vessel: h.vessel && typeof h.vessel === "object" ? (h.vessel as VesselDetails) : vessel,
       notes: Array.isArray(h.notes) ? (h.notes as Note[]) : [],
       weather: h.weather && typeof h.weather === "object" ? (h.weather as WeatherState) : {},
+      autoTrack: Array.isArray(h.autoTrack) ? normalizeAutoTrack(h.autoTrack as any[]) : [],
       runningLog: Array.isArray(h.runningLog)
         ? (h.runningLog as any[]).map((r: any) => {
             const courseMagnetic =
@@ -526,6 +559,7 @@ function normalizeBackupToState(obj: unknown): AppState | null {
         text: String((n as Note).text ?? ""),
       })),
     log: normalizedLog,
+    autoTrack: normalizedAutoTrack,
     history: normalizedHistory,
     pos: {
       latDeg: String((pos as any).latDeg ?? ""),
@@ -560,6 +594,7 @@ function defaultState(): AppState {
     watchkeeper: "",
     notes: [],
     log: [],
+    autoTrack: [],
     history: [],
     pos: {
       latDeg: "",
@@ -981,6 +1016,36 @@ function localDateKey(value?: string | null): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+function buildAutoTrack(autoTrack: AutoTrackFix[], entries: RunningEntry[], dayISO: string) {
+  const autoPoints = autoTrack
+    .filter((fix) => fix.date === dayISO)
+    .map((fix): TrackPoint => ({
+      lat: fix.lat,
+      lon: fix.lon,
+      time: fix.time || new Date(fix.recordedAtISO).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      label: "GPS fix",
+      courseMagnetic: fix.courseDeg != null ? String(Math.round(fix.courseDeg)) : undefined,
+      source: "auto" as const,
+      sortKey: new Date(fix.recordedAtISO).getTime(),
+    }));
+
+  const logPoints = entries
+    .map((entry): TrackPoint | null => {
+      const point = parseLoggedPosition(entry.position, entry.time);
+      if (!point) return null;
+      const [hh = "0", mm = "0"] = entry.time.split(":");
+      return {
+        ...point,
+        courseMagnetic: entry.courseMagnetic,
+        remarks: entry.remarks,
+        source: "log" as const,
+        sortKey: new Date(`${entry.date}T${hh.padStart(2, "0")}:${mm.padStart(2, "0")}:00`).getTime(),
+      };
+    })
+    .filter((point): point is TrackPoint => point != null);
+
+  return buildTrackFromPoints([...autoPoints, ...logPoints].sort((a, b) => (a.sortKey ?? 0) - (b.sortKey ?? 0)));
+}
 function buildGatewayTrack(history: BridgeLogGatewayState[], entries: RunningEntry[], dayISO: string) {
   const autoPoints = history
     .map((sample): TrackPoint | null => {
@@ -1224,10 +1289,12 @@ export default function App() {
   const [mapOpen, setMapOpen] = useState(false);
   const [gatewayClient, setGatewayClient] = useState<GatewayClientState>(() => defaultGatewayClientState());
   const [gatewayHistory, setGatewayHistory] = useState<BridgeLogGatewayState[]>([]);
+  const [tabletGps, setTabletGps] = useState<{ lat: number; lon: number; speedKnots: number | null; courseDeg: number | null; updatedAtISO: string } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const remoteSaveArmed = useRef(false);
   const weatherPositionRef = useRef<{ lat: number; lon: number; fetchedAt: number } | null>(null);
+  const lastAutoTrackRef = useRef<number>(0);
 
   function showToast(msg: string, ok = false) {
     setToast(ok ? `✓ ${msg}` : `BridgeLog Pro: ${msg}`);
@@ -1369,6 +1436,7 @@ export default function App() {
             notes: prev.notes.filter((n) => n.date === prev.daily.date),
             weather: prev.lastWeather ?? {},
             runningLog: todays,
+            autoTrack: prev.autoTrack.filter((fix) => fix.date === prev.daily.date),
             fuelSummary: {
               usedLitres: Math.round(fuel.usedSum * 100) / 100,
               lastTotalFuel: fuel.lastTotalFuel ?? null,
@@ -1377,11 +1445,13 @@ export default function App() {
 
           const nextHistory = [snap, ...prev.history];
           const nextNotes = prev.notes.filter((n) => n.date !== prev.daily.date);
+          const nextAutoTrack = prev.autoTrack.filter((fix) => fix.date !== prev.daily.date);
 
           return {
             ...prev,
             history: nextHistory,
             notes: nextNotes,
+            autoTrack: nextAutoTrack,
             daily: { ...prev.daily, date: d },
           };
         });
@@ -1420,7 +1490,7 @@ export default function App() {
   const isNorthernEscapeVessel = userEmailKey.includes(NORTHERN_ESCAPE_LOGIN_HINT) || vesselNameKey.includes("northern escape");
   const useGatewayData = isNorthernEscapeVessel;
   const useTabletGps = isBelugaVessel;
-  const todaysTrack = useMemo(() => useGatewayData ? buildGatewayTrack(gatewayHistory, todaysLog, state.daily.date) : buildTrack(todaysLog), [useGatewayData, gatewayHistory, todaysLog, state.daily.date]);
+  const todaysTrack = useMemo(() => useGatewayData ? buildGatewayTrack(gatewayHistory, todaysLog, state.daily.date) : buildAutoTrack(state.autoTrack, todaysLog, state.daily.date), [useGatewayData, gatewayHistory, state.autoTrack, todaysLog, state.daily.date]);
   const gateway = gatewayClient.state.gateway;
   const gatewayVessel = gatewayClient.state.vessel;
   const gatewayStatusLabel =
@@ -1435,11 +1505,16 @@ export default function App() {
       : "Waiting";
   const gatewayNmeaEndpoint = `${gateway.nmeaListenHost === "0.0.0.0" ? "BridgeLog Gateway PC IP" : gateway.nmeaListenHost}:${gateway.nmeaListenPort}`;
   const nmeaHasPosition = useGatewayData && gatewayVessel.latitude != null && gatewayVessel.longitude != null;
+  const tabletHasPosition = useTabletGps && tabletGps != null;
   const activeCoords = nmeaHasPosition
     ? { lat: gatewayVessel.latitude as number, lon: gatewayVessel.longitude as number }
+    : tabletHasPosition
+    ? { lat: tabletGps.lat, lon: tabletGps.lon }
     : state.coords;
   const activeLocLabel = nmeaHasPosition
     ? `${(gatewayVessel.latitude as number).toFixed(4)}, ${(gatewayVessel.longitude as number).toFixed(4)}`
+    : tabletHasPosition
+    ? `${tabletGps.lat.toFixed(4)}, ${tabletGps.lon.toFixed(4)}`
     : state.locLabel;
   const nmeaTelemetry = [
     gatewayVessel.speedKnots != null ? `${gatewayVessel.speedKnots.toFixed(1)} kt` : null,
@@ -1562,6 +1637,32 @@ export default function App() {
     showToast(okMessage, true);
   }
 
+  function gpsSnapshotFromPosition(pos: GeolocationPosition) {
+    const speedKnots = typeof pos.coords.speed === "number" && Number.isFinite(pos.coords.speed)
+      ? pos.coords.speed * 1.94384449
+      : null;
+    const courseDeg = typeof pos.coords.heading === "number" && Number.isFinite(pos.coords.heading)
+      ? pos.coords.heading
+      : null;
+    return {
+      lat: Number(pos.coords.latitude.toFixed(6)),
+      lon: Number(pos.coords.longitude.toFixed(6)),
+      speedKnots,
+      courseDeg,
+      updatedAtISO: new Date(pos.timestamp || Date.now()).toISOString(),
+    };
+  }
+
+  function applyTabletGpsSnapshot(snapshot: { lat: number; lon: number; speedKnots: number | null; courseDeg: number | null; updatedAtISO: string }, okMessage = "Tablet GPS position applied") {
+    applyDecimalPosition(snapshot.lat, snapshot.lon, okMessage);
+    setEntryFields((prev) => ({
+      ...prev,
+      courseMagnetic: snapshot.courseDeg != null ? String(Math.round(snapshot.courseDeg)) : prev.courseMagnetic,
+      courseGyro: snapshot.courseDeg != null ? String(Math.round(snapshot.courseDeg)) : prev.courseGyro,
+      courseSteering: snapshot.courseDeg != null ? String(Math.round(snapshot.courseDeg)) : prev.courseSteering,
+      speed: snapshot.speedKnots != null ? snapshot.speedKnots.toFixed(1) : prev.speed,
+    }));
+  }
   function useTabletGpsPosition() {
     if (!("geolocation" in navigator)) {
       showToast("Tablet GPS is unavailable in this browser");
@@ -1569,13 +1670,19 @@ export default function App() {
     }
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        applyDecimalPosition(pos.coords.latitude, pos.coords.longitude, "Tablet GPS position applied");
+        const snapshot = gpsSnapshotFromPosition(pos);
+        setTabletGps(snapshot);
+        applyTabletGpsSnapshot(snapshot);
       },
       (err) => showToast(err.message || "Tablet GPS position unavailable"),
       { enableHighAccuracy: true, maximumAge: 15000, timeout: 12000 }
     );
   }
   function autoFillFromGateway() {
+    if (!useGatewayData) {
+      showToast("NMEA auto-fill is enabled for Northern Escape only");
+      return;
+    }
     const hasPosition = gatewayVessel.latitude != null && gatewayVessel.longitude != null;
     if (hasPosition) {
       applyDecimalPosition(gatewayVessel.latitude as number, gatewayVessel.longitude as number, "Gateway position applied");
@@ -1642,6 +1749,61 @@ export default function App() {
     void fetchWeather(lat, lon);
   }
 
+  useEffect(() => {
+    if (!userId || !stateHydrated || stateLoadError || !useTabletGps || !("geolocation" in navigator)) return;
+
+    const watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        const snapshot = gpsSnapshotFromPosition(pos);
+        setTabletGps(snapshot);
+
+        const fixTime = new Date(snapshot.updatedAtISO).getTime();
+        setState((prev) => {
+          if (prev.daily.mode !== "Underway") return prev;
+
+          const todaysFixes = prev.autoTrack.filter((fix) => fix.date === prev.daily.date);
+          const lastFix = todaysFixes.at(-1);
+          const lastFixTime = lastFix ? new Date(lastFix.recordedAtISO).getTime() : 0;
+          const lastStoredTime = Math.max(lastAutoTrackRef.current, lastFixTime);
+          if (lastStoredTime && fixTime - lastStoredTime < AUTO_TRACK_INTERVAL_MS) return prev;
+
+          let moving = snapshot.speedKnots != null && snapshot.speedKnots >= MOVING_SPEED_KTS;
+          if (!moving && lastFix) {
+            const elapsedHours = Math.max((fixTime - lastFixTime) / 3_600_000, 0);
+            const distance = distanceNm(
+              { lat: lastFix.lat, lon: lastFix.lon, time: lastFix.time, label: "Previous" },
+              { lat: snapshot.lat, lon: snapshot.lon, time: nowHHMM(), label: "Current" }
+            );
+            moving = elapsedHours > 0 && distance / elapsedHours >= MOVING_SPEED_KTS && distance >= 0.05;
+          }
+          if (!moving) return prev;
+
+          lastAutoTrackRef.current = fixTime;
+          const nextFix: AutoTrackFix = {
+            date: prev.daily.date,
+            time: nowHHMM(),
+            lat: snapshot.lat,
+            lon: snapshot.lon,
+            recordedAtISO: snapshot.updatedAtISO,
+            courseDeg: snapshot.courseDeg,
+            speedKnots: snapshot.speedKnots,
+            source: "tablet-gps",
+          };
+
+          return {
+            ...prev,
+            autoTrack: [...prev.autoTrack.filter((fix) => fix.date === prev.daily.date || fix.date >= getYesterdayISO(prev.daily.date)), nextFix].slice(-2000),
+          };
+        });
+      },
+      () => {
+        // Manual entry remains available if tablet GPS drops out.
+      },
+      { enableHighAccuracy: true, maximumAge: 15000, timeout: 12000 }
+    );
+
+    return () => navigator.geolocation.clearWatch(watchId);
+  }, [userId, stateHydrated, stateLoadError, useTabletGps]);
   useEffect(() => {
     if (!userId || !stateHydrated || stateLoadError || !useGatewayData) {
       setGatewayClient(defaultGatewayClientState());
@@ -1905,6 +2067,7 @@ export default function App() {
         notes: prev.notes.filter((n) => n.date === prev.daily.date),
         weather: prev.lastWeather ?? {},
         runningLog: todays,
+        autoTrack: prev.autoTrack.filter((fix) => fix.date === prev.daily.date),
         fuelSummary: {
           usedLitres: Math.round(fuel.usedSum * 100) / 100,
           lastTotalFuel: fuel.lastTotalFuel ?? null,
@@ -3042,7 +3205,7 @@ export default function App() {
                             <b>Track Plot</b>
                           </div>
                           <TrackPlotView
-                            track={buildTrack(h.runningLog || [])}
+                            track={buildAutoTrack(h.autoTrack || [], h.runningLog || [], h.date)}
                             emptyText="No plotted positions saved for this day."
                             compact
                           />
