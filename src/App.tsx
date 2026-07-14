@@ -14,6 +14,8 @@ const SUPABASE_ANON_KEY =
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const WEATHER_REFRESH_MS = 10 * 60_000;
 const GATEWAY_URL_STORAGE_KEY = "blp-gateway-url";
+const BELUGA_LOGIN_EMAIL = "beluga@morrisnautical.com.au";
+const NORTHERN_ESCAPE_LOGIN_HINT = "northernescape";
 
 /* =========================================================
    Types
@@ -1210,6 +1212,7 @@ export default function App() {
 
   const [sessionReady, setSessionReady] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
   const [stateHydrated, setStateHydrated] = useState(false);
   const [stateLoadError, setStateLoadError] = useState<string | null>(null);
 
@@ -1218,7 +1221,8 @@ export default function App() {
   const [loginStatus, setLoginStatus] = useState("Not logged in");
 
   const [state, setState] = useState<AppState>(() => defaultState());
-  const [mapOpen, setMapOpen] = useState(false);  const [gatewayClient, setGatewayClient] = useState<GatewayClientState>(() => defaultGatewayClientState());
+  const [mapOpen, setMapOpen] = useState(false);
+  const [gatewayClient, setGatewayClient] = useState<GatewayClientState>(() => defaultGatewayClientState());
   const [gatewayHistory, setGatewayHistory] = useState<BridgeLogGatewayState[]>([]);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1249,11 +1253,13 @@ export default function App() {
       if (!mounted) return;
       const uid = data.session?.user?.id ?? null;
       setUserId(uid);
+      setUserEmail(data.session?.user?.email ?? null);
       setSessionReady(true);
     })();
 
     const { data: sub } = supabase.auth.onAuthStateChange((_event, sess) => {
       setUserId(sess?.user?.id ?? null);
+      setUserEmail(sess?.user?.email ?? null);
     });
 
     return () => {
@@ -1271,6 +1277,7 @@ export default function App() {
     if (!userId) {
       setStateHydrated(false);
       setStateLoadError(null);
+      setUserEmail(null);
       setState(defaultState());
       return;
     }
@@ -1407,7 +1414,13 @@ export default function App() {
     return computeFuelForDay(todaysLog, prevFuel);
   }, [todaysLog, state.history, state.daily.date]);
 
-  const todaysTrack = useMemo(() => buildGatewayTrack(gatewayHistory, todaysLog, state.daily.date), [gatewayHistory, todaysLog, state.daily.date]);
+  const userEmailKey = (userEmail ?? "").trim().toLowerCase();
+  const vesselNameKey = (state.vessel.name ?? "").trim().toLowerCase();
+  const isBelugaVessel = userEmailKey === BELUGA_LOGIN_EMAIL || vesselNameKey.includes("beluga");
+  const isNorthernEscapeVessel = userEmailKey.includes(NORTHERN_ESCAPE_LOGIN_HINT) || vesselNameKey.includes("northern escape");
+  const useGatewayData = isNorthernEscapeVessel;
+  const useTabletGps = isBelugaVessel;
+  const todaysTrack = useMemo(() => useGatewayData ? buildGatewayTrack(gatewayHistory, todaysLog, state.daily.date) : buildTrack(todaysLog), [useGatewayData, gatewayHistory, todaysLog, state.daily.date]);
   const gateway = gatewayClient.state.gateway;
   const gatewayVessel = gatewayClient.state.vessel;
   const gatewayStatusLabel =
@@ -1421,7 +1434,7 @@ export default function App() {
       ? "Error"
       : "Waiting";
   const gatewayNmeaEndpoint = `${gateway.nmeaListenHost === "0.0.0.0" ? "BridgeLog Gateway PC IP" : gateway.nmeaListenHost}:${gateway.nmeaListenPort}`;
-  const nmeaHasPosition = gatewayVessel.latitude != null && gatewayVessel.longitude != null;
+  const nmeaHasPosition = useGatewayData && gatewayVessel.latitude != null && gatewayVessel.longitude != null;
   const activeCoords = nmeaHasPosition
     ? { lat: gatewayVessel.latitude as number, lon: gatewayVessel.longitude as number }
     : state.coords;
@@ -1549,6 +1562,19 @@ export default function App() {
     showToast(okMessage, true);
   }
 
+  function useTabletGpsPosition() {
+    if (!("geolocation" in navigator)) {
+      showToast("Tablet GPS is unavailable in this browser");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        applyDecimalPosition(pos.coords.latitude, pos.coords.longitude, "Tablet GPS position applied");
+      },
+      (err) => showToast(err.message || "Tablet GPS position unavailable"),
+      { enableHighAccuracy: true, maximumAge: 15000, timeout: 12000 }
+    );
+  }
   function autoFillFromGateway() {
     const hasPosition = gatewayVessel.latitude != null && gatewayVessel.longitude != null;
     if (hasPosition) {
@@ -1617,7 +1643,11 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (!userId || !stateHydrated || stateLoadError) return;
+    if (!userId || !stateHydrated || stateLoadError || !useGatewayData) {
+      setGatewayClient(defaultGatewayClientState());
+      setGatewayHistory([]);
+      return;
+    }
 
     let stopped = false;
     let events: EventSource | null = null;
@@ -1677,7 +1707,7 @@ export default function App() {
     };
   }, [userId, stateHydrated, stateLoadError]);
   useEffect(() => {
-    if (!userId || !stateHydrated || stateLoadError || !gatewayClient.baseUrl) return;
+    if (!userId || !stateHydrated || stateLoadError || !useGatewayData || !gatewayClient.baseUrl) return;
     let stopped = false;
     const loadGatewayHistory = async () => {
       try {
@@ -1696,10 +1726,10 @@ export default function App() {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [userId, stateHydrated, stateLoadError, gatewayClient.baseUrl]);
+  }, [userId, stateHydrated, stateLoadError, useGatewayData, gatewayClient.baseUrl]);
 
   useEffect(() => {
-    if (!userId || !stateHydrated || stateLoadError || !nmeaHasPosition) return;
+    if (!userId || !stateHydrated || stateLoadError || !useGatewayData || !nmeaHasPosition) return;
     const lat = gatewayVessel.latitude as number;
     const lon = gatewayVessel.longitude as number;
     const previous = weatherPositionRef.current;
@@ -1710,7 +1740,7 @@ export default function App() {
 
     weatherPositionRef.current = { lat, lon, fetchedAt: now };
     void fetchWeather(lat, lon);
-  }, [userId, stateHydrated, stateLoadError, nmeaHasPosition, gatewayVessel.latitude, gatewayVessel.longitude]);
+  }, [userId, stateHydrated, stateLoadError, useGatewayData, nmeaHasPosition, gatewayVessel.latitude, gatewayVessel.longitude]);
   function composedPos(): string {
     const { latDeg, latMin, latMinDec, latHem, lonDeg, lonMin, lonMinDec, lonHem } = state.pos;
     const latDec = String(latMinDec ?? "").padStart(3, "0");
@@ -1812,21 +1842,21 @@ export default function App() {
           date: prev.daily.date,
           time: nowHHMM(),
           position: p,
-          courseMagnetic: gatewayVessel.courseDeg != null ? String(Math.round(gatewayVessel.courseDeg)) : "",
-          courseGyro: gatewayVessel.headingDeg != null ? String(Math.round(gatewayVessel.headingDeg)) : "",
-          courseSteering: gatewayVessel.headingDeg != null ? String(Math.round(gatewayVessel.headingDeg)) : "",
-          speed: gatewayVessel.speedKnots != null ? gatewayVessel.speedKnots.toFixed(1) : "",
-          windDir: gatewayVessel.windDirTrueDeg != null ? String(Math.round(gatewayVessel.windDirTrueDeg)) : "",
-          windForce: gatewayVessel.windSpeedKnots != null ? beaufortFromKnots(gatewayVessel.windSpeedKnots) : "",
+          courseMagnetic: livePosition && gatewayVessel.courseDeg != null ? String(Math.round(gatewayVessel.courseDeg)) : "",
+          courseGyro: livePosition && gatewayVessel.headingDeg != null ? String(Math.round(gatewayVessel.headingDeg)) : "",
+          courseSteering: livePosition && gatewayVessel.headingDeg != null ? String(Math.round(gatewayVessel.headingDeg)) : "",
+          speed: livePosition && gatewayVessel.speedKnots != null ? gatewayVessel.speedKnots.toFixed(1) : "",
+          windDir: livePosition && gatewayVessel.windDirTrueDeg != null ? String(Math.round(gatewayVessel.windDirTrueDeg)) : "",
+          windForce: livePosition && gatewayVessel.windSpeedKnots != null ? beaufortFromKnots(gatewayVessel.windSpeedKnots) : "",
           sea: "",
           sky: "",
           visibility: "",
-          barometer: gatewayVessel.barometerHpa != null ? formatLogNumber(gatewayVessel.barometerHpa, 0) : "",
-          airTemp: gatewayVessel.airTempC != null ? formatLogNumber(gatewayVessel.airTempC, 1) : "",
-          seaTemp: gatewayVessel.waterTempC != null ? formatLogNumber(gatewayVessel.waterTempC, 1) : "",
+          barometer: livePosition && gatewayVessel.barometerHpa != null ? formatLogNumber(gatewayVessel.barometerHpa, 0) : "",
+          airTemp: livePosition && gatewayVessel.airTempC != null ? formatLogNumber(gatewayVessel.airTempC, 1) : "",
+          seaTemp: livePosition && gatewayVessel.waterTempC != null ? formatLogNumber(gatewayVessel.waterTempC, 1) : "",
           engines: "",
           watchkeeper: prev.watchkeeper || "",
-          remarks: gatewayVessel.depthMeters != null ? `${text} - Depth ${gatewayVessel.depthMeters.toFixed(1)} m` : text,
+          remarks: livePosition && gatewayVessel.depthMeters != null ? `${text} - Depth ${gatewayVessel.depthMeters.toFixed(1)} m` : text,
           totalFuel: "",
         },
         ...prev.log,
@@ -2273,21 +2303,38 @@ export default function App() {
                 </div>
 
                 <div className="row" style={{ marginTop: 6 }}>
+                  {useTabletGps ? (
+                    <button className="btn" onClick={useTabletGpsPosition}>
+                      Use tablet GPS
+                    </button>
+                  ) : null}
                   <button className="btn" onClick={fromPosFields}>
                     From position fields
                   </button>
                   <span className="muted right">
                     {activeCoords.lat != null && activeCoords.lon != null
-                      ? `NMEA position ${activeCoords.lat.toFixed(4)}, ${activeCoords.lon.toFixed(4)}`
-                      : "Waiting for Gateway NMEA or manual entry"}
+                      ? `${useGatewayData ? "NMEA" : useTabletGps ? "Tablet GPS" : "Manual"} position ${activeCoords.lat.toFixed(4)}, ${activeCoords.lon.toFixed(4)}`
+                      : useGatewayData
+                      ? "Waiting for Gateway NMEA or manual entry"
+                      : useTabletGps
+                      ? "Use tablet GPS or manual entry"
+                      : "Set position manually"}
                   </span>
                 </div>
 
-                <div className="grid-3" style={{ marginTop: 8 }}>
-                  <div className="badge">NMEA source: <span className="right">BridgeLog Gateway {gatewayStatusLabel}</span></div>
-                  <div className="muted">Endpoint: <span className="mono">{gatewayNmeaEndpoint}</span></div>
-                  <div className="muted">{nmeaTelemetry || "Waiting for NMEA vessel data"}</div>
-                </div>
+                {useGatewayData ? (
+                  <div className="grid-3" style={{ marginTop: 8 }}>
+                    <div className="badge">NMEA source: <span className="right">BridgeLog Gateway {gatewayStatusLabel}</span></div>
+                    <div className="muted">Endpoint: <span className="mono">{gatewayNmeaEndpoint}</span></div>
+                    <div className="muted">{nmeaTelemetry || "Waiting for NMEA vessel data"}</div>
+                  </div>
+                ) : useTabletGps ? (
+                  <div className="grid-3" style={{ marginTop: 8 }}>
+                    <div className="badge">GPS source: <span className="right">Tablet GPS</span></div>
+                    <div className="muted">Beluga uses the Garmin GLO through the tablet location service.</div>
+                    <div className="muted">Manual lat/long remains editable.</div>
+                  </div>
+                ) : null}
                 <div className="weather-hero" style={{ marginTop: 8 }}>
                   <div className="weather-icon">{wxIcon(wx.weatherCode)}</div>
                   <div>
@@ -2383,6 +2430,7 @@ export default function App() {
               <div className="section">
                 <h2>New Running Log Entry</h2>
 
+                {useGatewayData ? (
                 <div className="nmea-panel">
                   <div className="nmea-head">
                     <div className={`nmea-status ${gatewayClient.connected ? gateway.status : "error"}`}>
@@ -2444,6 +2492,7 @@ export default function App() {
                     </span>
                   </div>
                 </div>
+                ) : null}
 
                 <div className="grid-4">
                   <div className="row">
@@ -2455,20 +2504,37 @@ export default function App() {
 
                   <div className="muted">Position</div>
 
-                  <div className="position-autofill">
-                    <button className="btn" onClick={autoFillFromGateway}>
-                      Fill from NMEA
-                    </button>
-                    <div>
+                  {useGatewayData ? (
+                    <div className="position-autofill">
+                      <button className="btn" onClick={autoFillFromGateway}>
+                        Fill from NMEA
+                      </button>
                       <div>
-                        <b>BridgeLog Gateway {gatewayStatusLabel}</b>
-                        <span className="muted"> • {activeCoords.lat != null && activeCoords.lon != null ? `${activeCoords.lat.toFixed(5)}, ${activeCoords.lon.toFixed(5)}` : "No NMEA position yet"}</span>
-                      </div>
-                      <div className="muted">
-                        {nmeaTelemetry || "Waiting for Gateway NMEA"} • Manual lat/long below remains editable.
+                        <div>
+                          <b>BridgeLog Gateway {gatewayStatusLabel}</b>
+                          <span className="muted"> • {activeCoords.lat != null && activeCoords.lon != null ? `${activeCoords.lat.toFixed(5)}, ${activeCoords.lon.toFixed(5)}` : "No NMEA position yet"}</span>
+                        </div>
+                        <div className="muted">
+                          {nmeaTelemetry || "Waiting for Gateway NMEA"} • Manual lat/long below remains editable.
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  ) : useTabletGps ? (
+                    <div className="position-autofill">
+                      <button className="btn" onClick={useTabletGpsPosition}>
+                        Fill from tablet GPS
+                      </button>
+                      <div>
+                        <div>
+                          <b>Tablet GPS</b>
+                          <span className="muted"> • {activeCoords.lat != null && activeCoords.lon != null ? `${activeCoords.lat.toFixed(5)}, ${activeCoords.lon.toFixed(5)}` : "No tablet GPS position yet"}</span>
+                        </div>
+                        <div className="muted">
+                          Beluga reads the Garmin GLO through the tablet location service. Manual lat/long below remains editable.
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
 
                   <div className="pos-row">
                     <input
