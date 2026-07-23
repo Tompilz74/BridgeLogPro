@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 /* =========================================================
@@ -1016,7 +1016,7 @@ function localDateKey(value?: string | null): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-function buildAutoTrack(autoTrack: AutoTrackFix[], entries: RunningEntry[], dayISO: string) {
+function buildAutoTrack(autoTrack: AutoTrackFix[], entries: RunningEntry[], dayISO: string, livePoint?: TrackPoint | null) {
   const autoPoints = autoTrack
     .filter((fix) => fix.date === dayISO)
     .map((fix): TrackPoint => ({
@@ -1044,7 +1044,11 @@ function buildAutoTrack(autoTrack: AutoTrackFix[], entries: RunningEntry[], dayI
     })
     .filter((point): point is TrackPoint => point != null);
 
-  return buildTrackFromPoints([...autoPoints, ...logPoints].sort((a, b) => (a.sortKey ?? 0) - (b.sortKey ?? 0)));
+  const points = [...autoPoints, ...logPoints];
+  if (livePoint && !points.some((point) => distanceNm(point, livePoint) < 0.005 && Math.abs((point.sortKey ?? 0) - (livePoint.sortKey ?? 0)) < 60_000)) {
+    points.push(livePoint);
+  }
+  return buildTrackFromPoints(points.sort((a, b) => (a.sortKey ?? 0) - (b.sortKey ?? 0)));
 }
 function buildGatewayTrack(history: BridgeLogGatewayState[], entries: RunningEntry[], dayISO: string) {
   const autoPoints = history
@@ -1293,8 +1297,18 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const remoteSaveArmed = useRef(false);
+  const pendingRemoteSave = useRef(false);
   const weatherPositionRef = useRef<{ lat: number; lon: number; fetchedAt: number } | null>(null);
   const lastAutoTrackRef = useRef<number>(0);
+
+  function markRemoteDirty() {
+    pendingRemoteSave.current = true;
+  }
+
+  function setUserEditedState(update: SetStateAction<AppState>) {
+    markRemoteDirty();
+    setState(update);
+  }
 
   function showToast(msg: string, ok = false) {
     setToast(ok ? `✓ ${msg}` : `BridgeLog Pro: ${msg}`);
@@ -1336,12 +1350,16 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    remoteSaveArmed.current = false;
+    pendingRemoteSave.current = false;
     if (saveTimer.current) {
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
 
     if (!userId) {
+      remoteSaveArmed.current = false;
+      pendingRemoteSave.current = false;
       setStateHydrated(false);
       setStateLoadError(null);
       setUserEmail(null);
@@ -1393,21 +1411,21 @@ export default function App() {
   const saveTimer = useRef<number | null>(null);
   useEffect(() => {
     if (!userId || !stateHydrated || stateLoadError) return;
+    const cacheKey = `blp-cache-${userId}`;
+    localStorage.setItem(cacheKey, JSON.stringify(state));
+
     if (!remoteSaveArmed.current) {
       remoteSaveArmed.current = true;
       return;
     }
-    const cacheKey = `blp-cache-${userId}`;
-    localStorage.setItem(cacheKey, JSON.stringify(state));
+
+    if (!pendingRemoteSave.current) return;
+    pendingRemoteSave.current = false;
 
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
       void upsertStateToSupabase(userId, { ...state, updatedAtISO: new Date().toISOString() });
     }, 700);
-
-    return () => {
-      if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    };
   }, [state, userId, stateHydrated, stateLoadError]);
 
   useEffect(() => {
@@ -1416,6 +1434,7 @@ export default function App() {
     const iv = window.setInterval(() => {
       const d = todayISO();
       if (d !== state.daily.date) {
+        markRemoteDirty();
         setState((prev) => {
           const todays = prev.log.filter((e) => e.date === prev.daily.date);
 
@@ -1490,7 +1509,22 @@ export default function App() {
   const isNorthernEscapeVessel = userEmailKey.includes(NORTHERN_ESCAPE_LOGIN_HINT) || vesselNameKey.includes("northern escape");
   const useGatewayData = isNorthernEscapeVessel;
   const useTabletGps = isBelugaVessel;
-  const todaysTrack = useMemo(() => useGatewayData ? buildGatewayTrack(gatewayHistory, todaysLog, state.daily.date) : buildAutoTrack(state.autoTrack, todaysLog, state.daily.date), [useGatewayData, gatewayHistory, state.autoTrack, todaysLog, state.daily.date]);
+  const tabletLiveTrackPoint = useMemo<TrackPoint | null>(() => {
+    if (!useTabletGps || !tabletGps || localDateKey(tabletGps.updatedAtISO) !== state.daily.date) return null;
+    return {
+      lat: tabletGps.lat,
+      lon: tabletGps.lon,
+      time: new Date(tabletGps.updatedAtISO).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      label: "Live GPS",
+      courseMagnetic: tabletGps.courseDeg != null ? String(Math.round(tabletGps.courseDeg)) : undefined,
+      source: "auto" as const,
+      sortKey: new Date(tabletGps.updatedAtISO).getTime(),
+    };
+  }, [useTabletGps, tabletGps, state.daily.date]);
+  const todaysTrack = useMemo(
+    () => useGatewayData ? buildGatewayTrack(gatewayHistory, todaysLog, state.daily.date) : buildAutoTrack(state.autoTrack, todaysLog, state.daily.date, tabletLiveTrackPoint),
+    [useGatewayData, gatewayHistory, state.autoTrack, todaysLog, state.daily.date, tabletLiveTrackPoint]
+  );
   const gateway = gatewayClient.state.gateway;
   const gatewayVessel = gatewayClient.state.vessel;
   const gatewayStatusLabel =
@@ -1767,16 +1801,17 @@ export default function App() {
           const lastStoredTime = Math.max(lastAutoTrackRef.current, lastFixTime);
           if (lastStoredTime && fixTime - lastStoredTime < AUTO_TRACK_INTERVAL_MS) return prev;
 
-          let moving = snapshot.speedKnots != null && snapshot.speedKnots >= MOVING_SPEED_KTS;
-          if (!moving && lastFix) {
-            const elapsedHours = Math.max((fixTime - lastFixTime) / 3_600_000, 0);
-            const distance = distanceNm(
-              { lat: lastFix.lat, lon: lastFix.lon, time: lastFix.time, label: "Previous" },
-              { lat: snapshot.lat, lon: snapshot.lon, time: nowHHMM(), label: "Current" }
-            );
-            moving = elapsedHours > 0 && distance / elapsedHours >= MOVING_SPEED_KTS && distance >= 0.05;
-          }
-          if (!moving) return prev;
+          const movedSinceLastFix = lastFix
+            ? distanceNm(
+                { lat: lastFix.lat, lon: lastFix.lon, time: lastFix.time, label: "Previous" },
+                { lat: snapshot.lat, lon: snapshot.lon, time: nowHHMM(), label: "Current" }
+              )
+            : null;
+          const movingBySpeed = snapshot.speedKnots != null && snapshot.speedKnots >= MOVING_SPEED_KTS;
+          const movingByDistance = movedSinceLastFix != null && movedSinceLastFix >= 0.05;
+
+          // Seed the track once underway, then only add later fixes when it has actually moved.
+          if (lastFix && !movingBySpeed && !movingByDistance) return prev;
 
           lastAutoTrackRef.current = fixTime;
           const nextFix: AutoTrackFix = {
@@ -1917,7 +1952,7 @@ export default function App() {
   function addNote() {
     const v = noteDraft.trim();
     if (!v) return;
-    setState((prev) => ({
+    setUserEditedState((prev) => ({
       ...prev,
       notes: [{ date: prev.daily.date, time: nowHHMM(), text: v }, ...prev.notes],
     }));
@@ -1958,7 +1993,7 @@ export default function App() {
       if (bf) sea = bf.wave;
     }
 
-    setState((prev) => ({
+    setUserEditedState((prev) => ({
       ...prev,
       log: [
         {
@@ -1988,66 +2023,112 @@ export default function App() {
   }
 
   function addMovement(kind: "Along" | "Cast Off" | "Anchor Down" | "Anchor Up") {
-    const livePosition = gatewayVessel.latitude != null && gatewayVessel.longitude != null;
-    const livePosFields = livePosition ? posFieldsFromDecimal(gatewayVessel.latitude as number, gatewayVessel.longitude as number) : null;
+    const startsTracking = kind === "Cast Off" || kind === "Anchor Up";
+    const stopsTracking = kind === "Anchor Down" || kind === "Along";
+    const gatewayPosition = useGatewayData && gatewayVessel.latitude != null && gatewayVessel.longitude != null;
+    const tabletPosition = useTabletGps && tabletGps != null;
+    const liveLat = gatewayPosition ? (gatewayVessel.latitude as number) : tabletPosition ? tabletGps.lat : null;
+    const liveLon = gatewayPosition ? (gatewayVessel.longitude as number) : tabletPosition ? tabletGps.lon : null;
+    const livePosFields = liveLat != null && liveLon != null ? posFieldsFromDecimal(liveLat, liveLon) : null;
     const livePositionLabel = livePosFields
       ? `${livePosFields.latDeg}°${livePosFields.latMin}.${livePosFields.latMinDec}'${livePosFields.latHem} / ${livePosFields.lonDeg}°${livePosFields.lonMin}.${livePosFields.lonMinDec}'${livePosFields.lonHem}`
       : "";
     const p = livePositionLabel || composedPos() || (todaysLog[0]?.position ?? "(pos TBD)");
     const text = `${kind} at ${p}`;
 
-    setState((prev) => {
+    if (stopsTracking) lastAutoTrackRef.current = 0;
+
+    setUserEditedState((prev) => {
       const nextNotes = [{ date: prev.daily.date, time: nowHHMM(), text }, ...prev.notes];
+      const courseValue = gatewayPosition
+        ? gatewayVessel.courseDeg
+        : tabletPosition
+        ? tabletGps.courseDeg
+        : null;
+      const headingValue = gatewayPosition ? gatewayVessel.headingDeg : courseValue;
+      const speedValue = gatewayPosition
+        ? gatewayVessel.speedKnots
+        : tabletPosition
+        ? tabletGps.speedKnots
+        : null;
 
       const nextLog = [
         {
           date: prev.daily.date,
           time: nowHHMM(),
           position: p,
-          courseMagnetic: livePosition && gatewayVessel.courseDeg != null ? String(Math.round(gatewayVessel.courseDeg)) : "",
-          courseGyro: livePosition && gatewayVessel.headingDeg != null ? String(Math.round(gatewayVessel.headingDeg)) : "",
-          courseSteering: livePosition && gatewayVessel.headingDeg != null ? String(Math.round(gatewayVessel.headingDeg)) : "",
-          speed: livePosition && gatewayVessel.speedKnots != null ? gatewayVessel.speedKnots.toFixed(1) : "",
-          windDir: livePosition && gatewayVessel.windDirTrueDeg != null ? String(Math.round(gatewayVessel.windDirTrueDeg)) : "",
-          windForce: livePosition && gatewayVessel.windSpeedKnots != null ? beaufortFromKnots(gatewayVessel.windSpeedKnots) : "",
+          courseMagnetic: courseValue != null ? String(Math.round(courseValue)) : "",
+          courseGyro: headingValue != null ? String(Math.round(headingValue)) : "",
+          courseSteering: headingValue != null ? String(Math.round(headingValue)) : "",
+          speed: speedValue != null ? speedValue.toFixed(1) : "",
+          windDir: gatewayPosition && gatewayVessel.windDirTrueDeg != null ? String(Math.round(gatewayVessel.windDirTrueDeg)) : "",
+          windForce: gatewayPosition && gatewayVessel.windSpeedKnots != null ? beaufortFromKnots(gatewayVessel.windSpeedKnots) : "",
           sea: "",
           sky: "",
           visibility: "",
-          barometer: livePosition && gatewayVessel.barometerHpa != null ? formatLogNumber(gatewayVessel.barometerHpa, 0) : "",
-          airTemp: livePosition && gatewayVessel.airTempC != null ? formatLogNumber(gatewayVessel.airTempC, 1) : "",
-          seaTemp: livePosition && gatewayVessel.waterTempC != null ? formatLogNumber(gatewayVessel.waterTempC, 1) : "",
+          barometer: gatewayPosition && gatewayVessel.barometerHpa != null ? formatLogNumber(gatewayVessel.barometerHpa, 0) : "",
+          airTemp: gatewayPosition && gatewayVessel.airTempC != null ? formatLogNumber(gatewayVessel.airTempC, 1) : "",
+          seaTemp: gatewayPosition && gatewayVessel.waterTempC != null ? formatLogNumber(gatewayVessel.waterTempC, 1) : "",
           engines: "",
           watchkeeper: prev.watchkeeper || "",
-          remarks: livePosition && gatewayVessel.depthMeters != null ? `${text} - Depth ${gatewayVessel.depthMeters.toFixed(1)} m` : text,
+          remarks: gatewayPosition && gatewayVessel.depthMeters != null ? `${text} - Depth ${gatewayVessel.depthMeters.toFixed(1)} m` : text,
           totalFuel: "",
         },
         ...prev.log,
       ];
 
       const nextMode: DailyState["mode"] =
-        kind === "Cast Off" || kind === "Anchor Up"
+        startsTracking
           ? "Underway"
           : kind === "Anchor Down"
           ? "@Anchor"
           : "Along";
 
+      let nextAutoTrack = prev.autoTrack;
+      if (startsTracking && tabletPosition && liveLat != null && liveLon != null) {
+        const stamp = new Date(tabletGps.updatedAtISO).getTime();
+        const todaysFixes = prev.autoTrack.filter((fix) => fix.date === prev.daily.date);
+        const lastFix = todaysFixes.at(-1);
+        const duplicateStart = lastFix
+          ? distanceNm(
+              { lat: lastFix.lat, lon: lastFix.lon, time: lastFix.time, label: "Previous" },
+              { lat: liveLat, lon: liveLon, time: nowHHMM(), label: "Current" }
+            ) < 0.005
+          : false;
+        if (!duplicateStart) {
+          lastAutoTrackRef.current = stamp;
+          const startFix: AutoTrackFix = {
+            date: prev.daily.date,
+            time: nowHHMM(),
+            lat: liveLat,
+            lon: liveLon,
+            recordedAtISO: tabletGps.updatedAtISO,
+            courseDeg: tabletGps.courseDeg,
+            speedKnots: tabletGps.speedKnots,
+            source: "tablet-gps",
+          };
+          nextAutoTrack = [...prev.autoTrack, startFix].slice(-2000);
+        }
+      }
+
       return {
         ...prev,
-        ...(livePosFields && livePosition
+        ...(livePosFields && liveLat != null && liveLon != null
           ? {
               pos: livePosFields,
-              coords: { lat: gatewayVessel.latitude as number, lon: gatewayVessel.longitude as number },
-              locLabel: `${(gatewayVessel.latitude as number).toFixed(4)}, ${(gatewayVessel.longitude as number).toFixed(4)}`,
+              coords: { lat: liveLat, lon: liveLon },
+              locLabel: `${liveLat.toFixed(4)}, ${liveLon.toFixed(4)}`,
             }
           : {}),
         notes: nextNotes,
         log: nextLog,
+        autoTrack: nextAutoTrack,
         daily: { ...prev.daily, mode: nextMode },
       };
     });
   }
   function saveDayToHistory() {
-    setState((prev) => {
+    setUserEditedState((prev) => {
       const todays = prev.log.filter((e) => e.date === prev.daily.date);
 
       const yISO = getYesterdayISO(prev.daily.date);
@@ -2106,7 +2187,7 @@ export default function App() {
       showToast("Invalid backup file");
       return;
     }
-    setState(norm);
+    setUserEditedState(norm);
     showToast("Restore complete", true);
   }
 
@@ -2136,6 +2217,8 @@ export default function App() {
   }
 
   async function doLogout() {
+    remoteSaveArmed.current = false;
+    pendingRemoteSave.current = false;
     await supabase.auth.signOut();
     setLoginStatus("Not logged in");
     showToast("Logged out", true);
@@ -2202,7 +2285,7 @@ export default function App() {
       return;
     }
 
-    setState((prev) => applyEditedEntry(prev, editCtx, editDraft));
+    setUserEditedState((prev) => applyEditedEntry(prev, editCtx, editDraft));
     closeEdit();
     showToast("Entry updated", true);
   }
@@ -2212,7 +2295,7 @@ export default function App() {
     if (!ok) return;
 
     const ctx: EditCtx = { scope, dayISO, key: entryKey(entry) };
-    setState((prev) => applyDeletedEntry(prev, ctx));
+    setUserEditedState((prev) => applyDeletedEntry(prev, ctx));
     showToast("Entry deleted", true);
   }
 
